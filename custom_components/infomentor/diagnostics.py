@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 
 from .util import lessons_on, next_school_day, school_day_bounds, tasks_due
 
-TO_REDACT = {"password", "username"}
+TO_REDACT = {"password", "username", "refresh_token"}
 
 
 async def async_get_config_entry_diagnostics(

@@ -9,17 +9,21 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
+from .const import CONF_AUTH_MODE
 from .coordinator import InfomentorCoordinator
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
 
-@dataclass(slots=True)
-class InfomentorRuntimeData:
-    """Det som hänger på config-posten i minnet."""
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Uppgradera v1 (username/password) till v2 (auth_mode + credentials).
 
-    coordinator: InfomentorCoordinator
-    session: aiohttp.ClientSession
+    Fyll i auth_mode så att inloggningen vet vilken väg den ska använda.
+    """
+    new_data = dict(entry.data)
+    new_data.setdefault(CONF_AUTH_MODE, "password")
+    hass.config_entries.async_update_entry(entry, data=new_data, version=2)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -46,3 +50,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Ladda om när inställningarna ändras."""
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+@dataclass(slots=True)
+class InfomentorRuntimeData:
+    """Det som hänger på config-posten i minnet."""
+
+    coordinator: InfomentorCoordinator
+    session: aiohttp.ClientSession

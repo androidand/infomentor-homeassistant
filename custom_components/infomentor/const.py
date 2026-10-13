@@ -15,6 +15,10 @@ CONF_SCAN_INTERVAL: Final = "scan_interval"
 CONF_ENABLE_LUNCH: Final = "enable_lunch"
 CONF_MATEO_UNIT: Final = "mateo_unit_id"
 CONF_NAMES: Final = "names"
+CONF_USERNAME: Final = "username"
+CONF_PASSWORD: Final = "password"
+CONF_REFRESH_TOKEN: Final = "refresh_token"
+CONF_AUTH_MODE: Final = "auth_mode"
 
 DEFAULT_SCAN_INTERVAL_MIN: Final = 20
 MIN_SCAN_INTERVAL_MIN: Final = 5

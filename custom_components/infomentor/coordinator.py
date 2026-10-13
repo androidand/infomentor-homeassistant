@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -14,7 +15,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import ApiError, CannotConnect, InfomentorApi, InfomentorError, InvalidAuth
+from .api import (
+    ApiError,
+    CannotConnect,
+    InfomentorApi,
+    InfomentorError,
+    InvalidAuth,
+    RevokedAuth,
+)
 from .const import (
     CONF_ENABLE_LUNCH,
     CONF_MATEO_UNIT,
@@ -82,7 +90,8 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
         self, hass: HomeAssistant, entry: ConfigEntry, session: aiohttp.ClientSession
     ) -> None:
         self.entry = entry
-        self.api = InfomentorApi(session, entry.data["username"], entry.data["password"])
+        self._lock = asyncio.Lock()
+        self.api = InfomentorApi(session)
         self._ok_calls = 0
         self._auth_skips = 0
         # planerings-id -> {"at": monotonic(), "info": {...}}
@@ -119,13 +128,47 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
                 raise UpdateFailed(f"Kunde inte nå InfoMentor: {err2}") from err2
 
     async def _login(self) -> list[dict[str, Any]]:
-        """Logga in. Fel uppgifter → reauth; nere → försök igen."""
+        """Logga in med den hållbara refresh-token.
+
+        RevokedAuth = token död -> reauth. CannotConnect = F5/Framända eller nere,
+        -> UpdateFailed (försök igen), aldrig reauth. Token rotaras internt och
+        skrivs tillbaka till config-posten, serialiserad per post.
+        """
+        refresh_token = self.entry.data.get("refresh_token")
+        if not refresh_token:
+            raise ConfigEntryAuthFailed("ingen refresh-token i config-posten – starta reauth")
         try:
-            return await self.api.async_login()
-        except InvalidAuth as err:
+            return await self._refresh_and_login(refresh_token)
+        except RevokedAuth as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except CannotConnect as err:
             raise UpdateFailed(f"Kunde inte nå InfoMentor: {err}") from err
+
+    async def _refresh_and_login(self, refresh_token: str) -> list[dict[str, Any]]:
+        """Friska token, skriv tillbaka den roterade token och logga in.
+
+        Rotar om token med en enda lock per uppdatering (håller en enda ägare av den
+        roterande token). Skriver tillbaka den nya token *före* bridge körs, så att
+        ett haveri mellan refresh och bridge inte lämnar en utgången token.
+        """
+        rotated_holder: dict[str, str | None] = {"token": None}
+
+        def mark_rotated(new_token: str) -> None:
+            rotated_holder["token"] = new_token
+
+        async with self._lock:
+            api = self.api
+            # async_login_with_token rotar token (kallar mark_rotated efter refresh,
+            # innan bridge) — vi skriver tillbaka den nya token direkt efteråt, innan
+            # något mer kan misslyckas. Locket håller en enda ägare av den roterande
+            # token så två uppdateringar inte racar.
+            pupils = await api.async_login_with_token(refresh_token, on_rotated=mark_rotated)
+            new_token = rotated_holder["token"]
+            if new_token:
+                self.hass.config_entries.async_update_entry(
+                    self.entry, data={**self.entry.data, "refresh_token": new_token}
+                )
+            return pupils
 
     async def _fetch_all(
         self, pupils: list[dict[str, Any]], *, strict: bool = True
