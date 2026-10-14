@@ -14,6 +14,7 @@ from .api import (
     CannotConnect,
     InfomentorApi,
     InvalidAuth,
+    RevokedAuth,
 )
 from .const import (
     CONF_ENABLE_LUNCH,
@@ -72,16 +73,20 @@ async def _validate_credentials(hass, username: str, password: str) -> list[dict
         await session.close()
 
 
-async def _validate_refresh_token(hass, refresh_token: str) -> list[dict[str, Any]]:
+async def _validate_refresh_token(hass, refresh_token: str) -> tuple[list[dict[str, Any]], str]:
     """Validera en pastad refresh-token: friska, bridge, plocka barnen.
 
-    Använder en egen session som stängs efteråt. Returnerar barnen på framgång,
-    RevokedAuth på ogiltig token, CannotConnect på nere/F5.
+    Använder en egen session som stängs efteråt. Returnerar (barn, roterad_token)
+    på framgång, RevokedAuth på ogiltig token, CannotConnect på nere/F5. Roteringen
+    fångas via on_rotated så att vi sparar den NYA tokenen — den pastade är förbrukad
+    så snart refreshen gått (persist-before-use).
     """
     session = await _make_session()
     try:
         api = InfomentorApi(session)
-        return await api.async_login_with_token(refresh_token)
+        captured: list[str] = []
+        pupils = await api.async_login_with_token(refresh_token, on_rotated=captured.append)
+        return pupils, (captured[0] if captured else refresh_token)
     finally:
         await session.close()
 
@@ -92,6 +97,19 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 2
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Meny: välj app-token (rekommenderat) eller användarnamn/lösenord."""
+        if user_input is not None:
+            if user_input["method"] == "user_token":
+                return await self.async_step_user_token()
+            return await self.async_step_password()
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema({vol.Required("method"): vol.In(["user_token", "password"])}),
+        )
+
+    async def async_step_password(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             username = user_input[CONF_USERNAME].strip()
@@ -118,7 +136,24 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_AUTH_MODE: "password",
                     },
                 )
-        return self.async_show_form(step_id="user", data_schema=STEP_USER_SCHEMA, errors=errors)
+        return self.async_show_form(step_id="password", data_schema=STEP_USER_SCHEMA, errors=errors)
+
+    async def async_migrate_entry(self, entry: ConfigEntry) -> bool:
+        """Migrera från v1 (användarnamn/lösenord) till v2 (hållbar token).
+
+        Vi tar bort lösenordet och sätter auth_mode=token; utan en sparad token
+        gör coordinatoren ConfigEntryAuthFailed -> om-auth, där användaren klistrar
+        in en frisk app-token.
+        """
+        if entry.version >= 2:
+            return True
+        _LOGGER.debug("Migrerar %s från version %s till 2", entry.title, entry.version)
+        new_data = dict(entry.data)
+        new_data.pop(CONF_PASSWORD, None)
+        new_data.pop(CONF_USERNAME, None)
+        new_data[CONF_AUTH_MODE] = "token"
+        self.hass.config_entries.async_update_entry(entry, version=2, data=new_data)
+        return True
 
     async def async_step_user_token(
         self, user_input: dict[str, Any] | None = None
@@ -128,7 +163,9 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             refresh_token = user_input[CONF_REFRESH_TOKEN].strip()
             try:
-                pupils = await _validate_refresh_token(self.hass, refresh_token)
+                pupils, rotated = await _validate_refresh_token(self.hass, refresh_token)
+            except RevokedAuth:
+                errors["base"] = "invalid_auth"
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except Exception:  # noqa: BLE001
@@ -143,7 +180,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(
                     title=title,
                     data={
-                        CONF_REFRESH_TOKEN: refresh_token,
+                        CONF_REFRESH_TOKEN: rotated,
                         CONF_AUTH_MODE: "token",
                     },
                 )
@@ -162,14 +199,16 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         auth_mode = entry.data.get(CONF_AUTH_MODE, "password")
         if user_input is not None:
+            data_updates = dict(user_input)
             try:
                 if auth_mode == "token":
                     refresh_token = user_input[CONF_REFRESH_TOKEN].strip()
-                    await _validate_refresh_token(self.hass, refresh_token)
+                    _pupils, rotated = await _validate_refresh_token(self.hass, refresh_token)
+                    data_updates[CONF_REFRESH_TOKEN] = rotated
                 else:
                     username = user_input[CONF_USERNAME].strip()
                     await _validate_credentials(self.hass, username, user_input[CONF_PASSWORD])
-            except InvalidAuth:
+            except (InvalidAuth, RevokedAuth):
                 errors["base"] = "invalid_auth"
             except CannotConnect:
                 errors["base"] = "cannot_connect"
@@ -179,7 +218,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 return self.async_update_reload_and_abort(
                     entry,
-                    data_updates=user_input,
+                    data_updates=data_updates,
                 )
         if auth_mode == "token":
             return self.async_show_form(

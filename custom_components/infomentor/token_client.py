@@ -180,7 +180,7 @@ def classify_token_response(
     - UNKNOWN: ogiltig JSON eller annat som varken är tydligt ALIVE eller REVOKED.
     """
     trimmed = (body or "").strip()
-    is_json = content_type in ("application/json", "json")
+    is_json = bool(content_type) and "json" in content_type.lower()
     looks_html = bool(trimmed) and trimmed[0] == "<"
     f5 = any(n.startswith("BIGipServer") for n in (set_cookie_names or []))
 
@@ -530,9 +530,13 @@ def make_aiohttp_request(session: Any, timeout: float = 30.0):
         method: str, url: str, data: str | None = None, headers: dict[str, str] | None = None
     ):
         if method == "GET":
-            return await session.get(url, headers=headers, timeout=client_timeout)
+            return await session.get(
+                url, headers=headers, timeout=client_timeout, allow_redirects=False
+            )
         if method == "POST":
-            return await session.post(url, data=data, headers=headers, timeout=client_timeout)
+            return await session.post(
+                url, data=data, headers=headers, timeout=client_timeout, allow_redirects=False
+            )
         raise ValueError(f"okej metod: {method}")
 
     return do_request

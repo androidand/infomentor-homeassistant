@@ -94,6 +94,7 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
         self.api = InfomentorApi(session)
         self._ok_calls = 0
         self._auth_skips = 0
+        self._refresh_inflight: asyncio.Future[None] | None = None
         # planerings-id -> {"at": monotonic(), "info": {...}}
         self._plan_details: dict[str, dict[str, Any]] = {}
         self._plan_ids_seen: set[str] = set()
@@ -145,30 +146,44 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
             raise UpdateFailed(f"Kunde inte nå InfoMentor: {err}") from err
 
     async def _refresh_and_login(self, refresh_token: str) -> list[dict[str, Any]]:
-        """Friska token, skriv tillbaka den roterade token och logga in.
+        """Friska token och logga in.
 
-        Rotar om token med en enda lock per uppdatering (håller en enda ägare av den
-        roterande token). Skriver tillbaka den nya token *före* bridge körs, så att
+        Två parallella uppdateringar delar *en enda* refresh (in-flight dedup): båda
+        får samma nya access-token, och endast ett token-anrop görs. Den roterade
+        refresh-tokenen skrivs tillbaka *innan* bridge körs (i mark_rotated), så att
         ett haveri mellan refresh och bridge inte lämnar en utgången token.
         """
+        if self._refresh_inflight is None:
+            self._refresh_inflight = asyncio.ensure_future(self._do_refresh(refresh_token))
+
+        refresh_task = self._refresh_inflight
+        try:
+            pupils, _new_token = await refresh_task
+        finally:
+            self._refresh_inflight = None
+
+        return pupils
+
+    async def _do_refresh(self, refresh_token: str):
+        """Gör refreshen och returnerar (pupils, rotated_token) för alla deltagare."""
         rotated_holder: dict[str, str | None] = {"token": None}
 
         def mark_rotated(new_token: str) -> None:
+            # Persist-before-use: skriv tillbaka den roterade token *nu*, innan bridge
+            # körs (api.py anropar on_rotated efter refresh, före bridge). Om bridge
+            # sedan havererar sitter vi på den nya token, inte den utgångna — nästa
+            # refresh lyckas istället för att ge en reauth-loop.
             rotated_holder["token"] = new_token
+            self.hass.config_entries.async_update_entry(
+                self.entry, data={**self.entry.data, "refresh_token": new_token}
+            )
 
         async with self._lock:
             api = self.api
-            # async_login_with_token rotar token (kallar mark_rotated efter refresh,
-            # innan bridge) — vi skriver tillbaka den nya token direkt efteråt, innan
-            # något mer kan misslyckas. Locket håller en enda ägare av den roterande
-            # token så två uppdateringar inte racar.
+            # async_login_with_token kallar mark_rotated efter refresh, innan bridge.
+            # Locket håller en enda ägare av den roterande token.
             pupils = await api.async_login_with_token(refresh_token, on_rotated=mark_rotated)
-            new_token = rotated_holder["token"]
-            if new_token:
-                self.hass.config_entries.async_update_entry(
-                    self.entry, data={**self.entry.data, "refresh_token": new_token}
-                )
-            return pupils
+            return pupils, rotated_holder["token"]
 
     async def _fetch_all(
         self, pupils: list[dict[str, Any]], *, strict: bool = True

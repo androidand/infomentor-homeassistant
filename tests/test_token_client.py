@@ -10,17 +10,16 @@ Här portas api-clients/infomentors tre delar utan nätverk:
 
 from __future__ import annotations
 
-import pytest
 import unittest
 
+import pytest
+
 try:
-    import aiohttp
     import yarl
 
     from custom_components.infomentor.token_client import (
         Blocked,
         CookieJar,
-        InfomentorTokenError,
         TokenError,
         TokenRevoked,
         bridge_web_session,
@@ -96,6 +95,7 @@ class FakeSession:
     def __init__(self, routes):
         self._routes = routes
         self.calls = []
+        self.allow_redirects_calls = []
 
     def route(self, method, predicate, responder):
         self._routes.append((method, predicate, responder))
@@ -108,10 +108,12 @@ class FakeSession:
                 return responder(str(url), method)
         raise AssertionError(f"oväntat anrop: {method} {url}")
 
-    async def get(self, url, headers=None, timeout=None):  # noqa: ANN001
+    async def get(self, url, headers=None, timeout=None, allow_redirects=True):  # noqa: ANN001
+        self.allow_redirects_calls.append(allow_redirects)
         return await self.request("GET", url, headers=headers)
 
-    async def post(self, url, data=None, headers=None, timeout=None):  # noqa: ANN001
+    async def post(self, url, data=None, headers=None, timeout=None, allow_redirects=True):  # noqa: ANN001
+        self.allow_redirects_calls.append(allow_redirects)
         return await self.request("POST", url, data=data, headers=headers)
 
     async def close(self):
@@ -249,12 +251,23 @@ class TestRefreshToken(unittest.IsolatedAsyncioTestCase):
             "POST",
             lambda u: u.endswith("/OAuth2/Token"),
             lambda u, m: FakeResponse(400, "<html>Bad Request</html>",
-                                      headers={"Content-Type": "text/html",
-                                               "Set-Cookie": "BIGipServer~INFOMENTOR~POOL=rd1; Path=/"}),
+                                       headers={"Content-Type": "text/html",
+                                                "Set-Cookie": "BIGipServer~INFOMENTOR~POOL=rd1; Path=/"}),
         )
         request = make_aiohttp_request(session)
         with self.assertRaises(Blocked):
             await refresh_token(request, "r0")
+
+    async def test_make_aiohttp_request_disables_redirects(self):
+        """Bridge:n läser Location själv — aiohttp får inte följa redirects (#5)."""
+        session = FakeSession([]).route(
+            "GET",
+            lambda u: True,
+            lambda u, m: FakeResponse(200, "ok"),
+        )
+        request = make_aiohttp_request(session)
+        await request("GET", "https://example.com/x")
+        self.assertEqual(session.allow_redirects_calls, [False])
 
 
 # --------------------------------------------------------------- classify_token_response
@@ -279,6 +292,25 @@ class TestClassify(unittest.TestCase):
     def test_unknown_unparseable_json(self):
         v = classify_token_response(200, "application/json", "{not json")
         self.assertEqual(v["verdict"], "UNKNOWN")
+
+    def test_non_200_json_error_is_revoked(self):
+        """Ett JSON OAuth-fel med status >= 400 ärREVOKED — annars faller detta test."""
+        v = classify_token_response(400, "application/json", '{"error":"invalid_grant"}')
+        self.assertEqual(v["verdict"], "REVOKED")
+
+    def test_json_with_charset_is_recognized(self):
+        """`application/json; charset=utf-8` är JSON — annars faller detta test (#4)."""
+        v = classify_token_response(
+            200, "application/json; charset=utf-8", '{"refresh_token":"r","access_token":"a"}'
+        )
+        self.assertEqual(v["verdict"], "ALIVE")
+
+    def test_json_with_charset_error_is_revoked(self):
+        """OAuth-fel med charset-bärda content-type är REVOKED, inte BLOCKED (#4)."""
+        v = classify_token_response(
+            400, "application/json; charset=utf-8", '{"error":"invalid_grant"}'
+        )
+        self.assertEqual(v["verdict"], "REVOKED")
 
 
 # --------------------------------------------------------------- bridge_web_session
