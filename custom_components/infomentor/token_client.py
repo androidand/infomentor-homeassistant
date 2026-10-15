@@ -329,6 +329,84 @@ class CookieJar:
 
 
 # --------------------------------------------------------------- bridge
+async def _oauth_submit_to_callback(
+    do_request: Any,
+    *,
+    request_token_url: str,
+    headers_for: Any,
+    mentor_base: str = "https://infomentor.se",
+    jar: CookieJar | None = None,
+) -> CookieJar:
+    """Del 2 av bridgen: request-token-sidan (dold oauth_token) -> submit -> LoginCallback.
+
+    Delas mellan token-bridge:n (friskad access-token) och BankID-driver:n (POST:ad
+    SAMLResponse ger request-token-sidan). Krävir att request-token-sidan nås med
+    headers_for (Bearer eller IdP-cookie); sätter IMHome i en jar på
+    LoginCallback-hoppet. Använder samma hopphandtering som bridge_web_session.
+    """
+    if jar is None:
+        jar = CookieJar()
+
+    # Hopp A — request-token-sidan bär en dold oauth_token.
+    resp = await _hop(do_request, "GET", request_token_url, headers_for(request_token_url))
+    _absorb_cookies(resp, request_token_url, jar)
+    try:
+        token_status = resp.status
+        if token_status < 200 or token_status >= 400:
+            raise TokenError(
+                f"hubbens OAuth request-token-sida misslyckades "
+                f"(status {token_status}) på {request_token_url}"
+            )
+        page_html = await resp.text()
+    finally:
+        resp.close()
+    oauth_token = _field_value(page_html, "oauth_token")
+    if not oauth_token:
+        raise TokenError(
+            f"request-token-sidan hade ingen oauth_token — webbsessionen är inte uppbyggd "
+            f"(sidlängd {len(page_html)})"
+        )
+
+    # Hopp B — POST oauth_token; omdirigar till LoginCallback.
+    submit_url = _form_action(page_html, request_token_url) or f"{mentor_base}{MENTOR_TOKEN_PATH}"
+    resp = await _hop(
+        do_request,
+        "POST",
+        submit_url,
+        {**headers_for(submit_url), "Content-Type": "application/x-www-form-urlencoded"},
+        f"oauth_token={oauth_token}",
+    )
+    _absorb_cookies(resp, submit_url, jar)
+    try:
+        callback_location = resp.headers.get("Location") or ""
+    finally:
+        resp.close()
+    if not callback_location:
+        raise TokenError("oauth_token POST:en omdirigade inte till LoginCallback")
+
+    # Hopp C — LoginCallback sätter IMHome.
+    callback_url = str(URL(submit_url).join(URL(callback_location)))
+    resp = await _hop(do_request, "GET", callback_url, headers_for(callback_url))
+    _absorb_cookies(resp, callback_url, jar)
+    try:
+        after_callback = resp.headers.get("Location") or ""
+    finally:
+        resp.close()
+    if after_callback:
+        next_url = str(URL(callback_url).join(URL(after_callback)))
+        resp = await _hop(do_request, "GET", next_url, headers_for(next_url))
+        _absorb_cookies(resp, next_url, jar)
+        resp.close()
+
+    if not jar.has("IMHome"):
+        got = ", ".join(c["name"] for c in jar.all()) or "(inga)"
+        raise TokenError(
+            f"bridgen slutförde men cookie-jaren har ingen IMHome — hubben avvisar den. "
+            f"Cookies erhålda: {got}"
+        )
+    return jar
+
+
 def _field_value(html: str, name: str) -> str | None:
     """Värdet på ett dolt formulärfält, oavsett attribute-ordning."""
     direct = re.search(
@@ -457,64 +535,14 @@ async def bridge_web_session(
         raise TokenError(f"handoff svarade {resp.status} — förväntade 302")
     request_token_url = str(URL(handoff_url).join(URL(location)))
 
-    # Hopp 3 — request-token-sidan bär en dold oauth_token.
-    resp = await _hop(do_request, "GET", request_token_url, headers_for(request_token_url))
-    _absorb_cookies(resp, request_token_url, jar)
-    try:
-        token_status = resp.status
-        page_html = await resp.text()
-    finally:
-        resp.close()
-    if token_status < 200 or token_status >= 400:
-        raise TokenError(
-            f"hubbens OAuth request-token-sida misslyckades "
-            f"(status {token_status}) på {request_token_url}"
-        )
-    oauth_token = _field_value(page_html, "oauth_token")
-    if not oauth_token:
-        raise TokenError(
-            f"request-token-sidan hade ingen oauth_token — webbsessionen är inte uppbyggd "
-            f"(sidlängd {len(page_html)})"
-        )
-
-    # Hopp 4 — POST oauth_token; omdirigerar till LoginCallback.
-    submit_url = _form_action(page_html, request_token_url) or f"{mentor_base}{MENTOR_TOKEN_PATH}"
-    resp = await _hop(
+    # Hopp 3-5 — request-token-sidan (dold oauth_token) -> submit -> LoginCallback (IMHome).
+    return await _oauth_submit_to_callback(
         do_request,
-        "POST",
-        submit_url,
-        {**headers_for(submit_url), "Content-Type": "application/x-www-form-urlencoded"},
-        f"oauth_token={oauth_token}",
+        request_token_url=request_token_url,
+        headers_for=headers_for,
+        mentor_base=mentor_base,
+        jar=jar,
     )
-    _absorb_cookies(resp, submit_url, jar)
-    try:
-        callback_location = resp.headers.get("Location") or ""
-    finally:
-        resp.close()
-    if not callback_location:
-        raise TokenError("oauth_token POST:en omdirigade inte till LoginCallback")
-
-    # Hopp 5 — LoginCallback sätter IMHome.
-    callback_url = str(URL(submit_url).join(URL(callback_location)))
-    resp = await _hop(do_request, "GET", callback_url, headers_for(callback_url))
-    _absorb_cookies(resp, callback_url, jar)
-    try:
-        after_callback = resp.headers.get("Location") or ""
-    finally:
-        resp.close()
-    if after_callback:
-        next_url = str(URL(callback_url).join(URL(after_callback)))
-        resp = await _hop(do_request, "GET", next_url, headers_for(next_url))
-        _absorb_cookies(resp, next_url, jar)
-        resp.close()
-
-    if not jar.has("IMHome"):
-        got = ", ".join(c["name"] for c in jar.all()) or "(inga)"
-        raise TokenError(
-            f"bridgen slutförde men cookie-jaren har ingen IMHome — hubben avvisar den. "
-            f"Cookies erhålda: {got}"
-        )
-    return jar
 
 
 # --------------------------------------------------------------- aiohttp-packare

@@ -17,6 +17,7 @@ from typing import Any
 import aiohttp
 from yarl import URL
 
+from .bankid import BankIDDriver
 from .const import HUB_BASE, MATEO_API, MENTOR_LOGIN
 from .token_client import (
     Blocked,
@@ -103,6 +104,47 @@ class InfomentorApi:
         if self._api_session is not None:
             await self._api_session.close()
             self._api_session = None
+
+    async def async_login_with_bankid(
+        self, *, idp: str = "stockholm_par", progress: Any | None = None
+    ) -> list[dict[str, Any]]:
+        """Inloggning med interaktiv BankID (Phase B: Stockholm Stad).
+
+        Kör driver:n (bankid.py) som styr SiteMinder + PhenixID till en
+        SAMLResponse/SMSESSION, byter sedan den mot en hub-cookie-jar med IMHome
+        via `bridge_web_session` (login.ashx -> LoginCallback -> IMHome). Används
+        i config-flödet som en aktiv step med async_show_progress; ingen token
+        roterar här — det nya IMHome-sätts direkt i HAs session.
+
+        Kastar InvalidAuth (bridgen avvisades), CannotConnect (nere) eller en
+        översatt BankIDError (avböjt/tid ut/ändrad sida).
+        """
+        # 1. Kör driver:n till SAMLResponse/SMSESSION.
+        driver = BankIDDriver()
+        do_request = self._do_request()
+        result = await driver.run(do_request, idp=idp, progress=progress)
+
+        # 2. Konvergera: driver:n POST:ar SAMLResponse -> login.ashx -> LoginCallback -> IMHome.
+        #    Använder en egen session så cookie-jaren är isolerad.
+        self._api_session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
+        api_request = make_aiohttp_request(self._api_session)
+        try:
+            jar = await driver.post_saml_response(
+                api_request, saml_response=result.saml_response, smsession=result.smsession
+            )
+        except TokenError as err:
+            await self._close_auxiliary_session()
+            raise InvalidAuth(str(err)) from err
+
+        # 3. Kör hubb-anropen med jar:t och pocka ut barnen.
+        self._session.cookie_jar.clear()
+        await self._set_cookie_jar(jar)
+        _, root = await self._follow(f"{HUB_BASE}/")
+        if "selectedPupilName" not in root:
+            raise InvalidAuth("inloggningen avvisades — BankID-svaret accepterades inte")
+        self.pupils = extract_pupils(root)
+        _LOGGER.debug("Inloggad via BankID, %d barn hittade", len(self.pupils))
+        return self.pupils
 
     async def async_login_with_token(
         self, refresh_token: str, *, on_rotated=None

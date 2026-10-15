@@ -16,6 +16,7 @@ from .api import (
     InvalidAuth,
     RevokedAuth,
 )
+from .bankid import BankIDDenied, BankIDError, BankIDPageChanged, BankIDTimeout
 from .const import (
     CONF_ENABLE_LUNCH,
     CONF_MATEO_UNIT,
@@ -23,6 +24,7 @@ from .const import (
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL_MIN,
     DOMAIN,
+    IDP_STOCKHOLM_PAR,
     MAX_SCAN_INTERVAL_MIN,
     MIN_SCAN_INTERVAL_MIN,
 )
@@ -73,6 +75,32 @@ async def _validate_credentials(hass, username: str, password: str) -> list[dict
         await session.close()
 
 
+async def _validate_bankid(
+    hass, idp: str, show_progress
+) -> list[dict[str, Any]]:
+    """Logga in med interaktiv BankID via driver:n.
+
+    Kör driver:n med async_show_progress (QR/autostart + uppgift som pollar).
+    Använder en egen session som stängs efteråt. Kastar BankIDError-typer,
+    InvalidAuth (bridgen avvisades) eller CannotConnect (nere).
+    """
+    session = await _make_session()
+    try:
+        api = InfomentorApi(session)
+
+        async def _progress(step):
+            await show_progress(
+                progress_action=step.action,
+                progress_task=step.task,
+                description=step.message,
+                item_number=0,
+            )
+
+        return await api.async_login_with_bankid(idp=idp, progress=_progress)
+    finally:
+        await session.close()
+
+
 async def _validate_refresh_token(hass, refresh_token: str) -> tuple[list[dict[str, Any]], str]:
     """Validera en pastad refresh-token: friska, bridge, plocka barnen.
 
@@ -101,10 +129,66 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             if user_input["method"] == "user_token":
                 return await self.async_step_user_token()
+            if user_input["method"] == "bankid":
+                return await self.async_step_bankid()
             return await self.async_step_password()
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({vol.Required("method"): vol.In(["user_token", "password"])}),
+            data_schema=vol.Schema(
+                {vol.Required("method"): vol.In(["user_token", "password", "bankid"])}
+            ),
+        )
+
+    async def async_step_bankid(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Interaktiv BankID-inloggning (Phase B: Stockholm Stad).
+
+        Visar en aktiv step med async_show_progress: QR-kod/autostart-länk och en
+        uppgift som pollar IdP:t tills BankID-appen godkänner. Kör driver:n och
+        konvergerar vid hubbens LoginCallback.
+
+        Endast Stockholm Stad (SiteMinder) stöds idag; andra skolor får token-klistring.
+        """
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            idp = user_input.get("idp", IDP_STOCKHOLM_PAR)
+            try:
+                pupils = await _validate_bankid(self.hass, idp, self.async_show_progress)
+            except BankIDDenied:
+                errors["base"] = "bankid_denied"
+            except BankIDTimeout:
+                errors["base"] = "bankid_timeout"
+            except (BankIDPageChanged, BankIDError):
+                errors["base"] = "bankid_page_changed"
+            except InvalidAuth:
+                errors["base"] = "invalid_auth"
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Oväntat fel vid BankID-inloggning")
+                errors["base"] = "unknown"
+            else:
+                await self.async_set_unique_id(f"bankid-{idp}")
+                self._abort_if_unique_id_configured()
+                title = "InfoMentor (BankID)"
+                if pupils:
+                    title = f"InfoMentor ({len(pupils)} barn) (BankID)"
+                return self.async_create_entry(
+                    title=title,
+                    data={
+                        CONF_AUTH_MODE: "bankid",
+                        "idp": idp,
+                    },
+                )
+        return self.async_show_form(
+            step_id="bankid",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("idp", default=IDP_STOCKHOLM_PAR): selector.TextSelector(),
+                }
+            ),
+            errors=errors,
         )
 
     async def async_step_password(
