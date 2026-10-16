@@ -24,6 +24,7 @@ from .api import (
     RevokedAuth,
 )
 from .const import (
+    CONF_AUTH_MODE,
     CONF_ENABLE_LUNCH,
     CONF_MATEO_UNIT,
     CONF_SCAN_INTERVAL,
@@ -129,15 +130,39 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
                 raise UpdateFailed(f"Kunde inte nå InfoMentor: {err2}") from err2
 
     async def _login(self) -> list[dict[str, Any]]:
-        """Logga in med den hållbara refresh-token.
+        """Logga in — dispatch på lagrat auth_mode.
+
+        password: befintligt lösenordsflöde (async_login). token: hållbara
+        refresh-token-flödet (friska + bridge). bankid: interaktiv BankID krävs per
+        inloggning; en entry utan sparat token/ lösenord får ConfigEntryAuthFailed så
+        HA startar om-auth.
 
         RevokedAuth = token död -> reauth. CannotConnect = F5/Framända eller nere,
         -> UpdateFailed (försök igen), aldrig reauth. Token rotaras internt och
         skrivs tillbaka till config-posten, serialiserad per post.
         """
+        auth_mode = self.entry.data.get(CONF_AUTH_MODE, "password")
+        if auth_mode == "password":
+            try:
+                return await self.api.async_login()
+            except InvalidAuth as err:
+                raise ConfigEntryAuthFailed(str(err)) from err
+            except CannotConnect as err:
+                raise UpdateFailed(f"Kunde inte nå InfoMentor: {err}") from err
+
+        if auth_mode == "bankid":
+            # BankID kräver interaktiv inloggning per pass; utan sparat token/ lösenord
+            # kan vi inte återupprätta sessionen vid omstart. Höjs som ConfigEntryAuthFailed
+            # så HA startar om-auth (BankID igen). Hålls isär från token-vägen nedan.
+            raise ConfigEntryAuthFailed(
+                "BankID-inloggning kräver interaktion – starta om-auth"
+            )
+
         refresh_token = self.entry.data.get("refresh_token")
         if not refresh_token:
-            raise ConfigEntryAuthFailed("ingen refresh-token i config-posten – starta reauth")
+            raise ConfigEntryAuthFailed(
+                "ingen refresh-token i config-posten – starta reauth"
+            )
         try:
             return await self._refresh_and_login(refresh_token)
         except RevokedAuth as err:

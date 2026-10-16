@@ -39,6 +39,7 @@ låg takt, aldrig auto-försöka, och en ändrad sida måste felaklassas tydligt
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -321,6 +322,28 @@ class BankIDDriver:
                 )
         raise BankIDTimeout(f"Tiden gick ut efter {MAX_POLL_ATTEMPTS} polls utan godkännande")
 
+    @staticmethod
+    def _urlencode_saml_response(saml_response: str) -> str:
+        """Kodar SAMLResponse som application/x-www-form-urlencoded.
+
+        En Base64-kodad SAMLResponse kan innehålla +, / och = — dessa måste
+        percent-erkodas annars tolkas kroppen fel av mottagaren.
+        """
+        import urllib.parse
+
+        return urllib.parse.urlencode({"SAMLResponse": saml_response})
+
+    @staticmethod
+    def _urlencode_saml_response(saml_response: str) -> str:
+        """Kodar SAMLResponse som application/x-www-form-urlencoded.
+
+        En Base64-kodad SAMLResponse kan innehålla +, / och = — dessa måste
+        percent-erkodas annars tolkas kroppen fel av mottagaren.
+        """
+        import urllib.parse
+
+        return urllib.parse.urlencode({"SAMLResponse": saml_response})
+
     async def post_saml_response(
         self,
         do_request: Any,
@@ -356,28 +379,34 @@ class BankIDDriver:
                 out["Cookie"] = f"{out['Cookie']}; SMSESSION={smsession}".strip("; ")
             return out
 
-        # Hopp 1 — POST SAMLResponse till login.ashx (eller starta om kedjan om tyst).
+        # Hopp 1 — POST SAMLResponse till login.ashx, eller starta om kedjan om tyst.
+        # Både saml_post_url (svars-URL för SAMLResponse) och start_url (ny kedja) pekar
+        # på samma login.ashx; de gemensamma hoppen 2-3 omdirigerar relativt den URL:n
+        # vi faktiskt skickade. Håll dem isär så att saml_response-grenen inte använder
+        # start_url (som bara sätts i tyst-grenen) — annars UnboundLocalError.
+        saml_post_url = f"{SSO_BASE}{SSO_LOGIN_PATH}?idp={idp}"
+        start_url = saml_post_url
         if saml_response:
-            saml_post_url = f"{SSO_BASE}{SSO_LOGIN_PATH}?idp={idp}"
             status, headers, _, jar2 = await self._once(
                 do_request,
                 "POST",
                 saml_post_url,
-                headers={
-                    **headers_for(saml_post_url),
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
-                body=f"SAMLResponse={saml_response}",
-            )
+            headers={
+                **headers_for(saml_post_url),
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+             body=self._urlencode_saml_response(saml_response),
+        )
             jar = jar2
             location = headers.get("location") or ""
             if not location:
                 from .token_client import TokenError
 
                 raise TokenError(f"POST SAMLResponse till login.ashx svarade {status}")
+            # SAMLResponse-grenen fortsätter relativt svars-URL:n.
+            start_url = str(URL(saml_post_url).join(URL(location)))
         elif smsession:
             # Tyst: starta kedjan med SMSESSION; saml2sso ger SAMLResponse-formen direkt.
-            start_url = f"{SSO_BASE}{SSO_LOGIN_PATH}?idp={idp}"
             status, headers, _, jar2 = await self._once(
                 do_request, "GET", start_url, headers=headers_for(start_url)
             )
@@ -579,6 +608,6 @@ class BankIDDriver:
 
     @staticmethod
     async def _sleep(seconds: float) -> None:
-        import asyncio
+
 
         await asyncio.sleep(seconds)

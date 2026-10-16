@@ -24,7 +24,6 @@ try:
         BankIDDenied,
         BankIDDriver,
         BankIDPageChanged,
-        BankIDResult,
         BankIDTimeout,
     )
 
@@ -51,7 +50,7 @@ class FakeResponse:
         if location is not None:
             h["location"] = location
         if set_cookies:
-            h["set-cookie"] = set(list(set_cookies))
+            h["set-cookie"] = set(set_cookies)
         self.headers = _Headers(h)
 
     async def text(self):
@@ -101,6 +100,7 @@ SSO = "https://sso.infomentor.se"
 SITEMINDER = "https://login001.stockholm.se"
 PHENIX = "https://login003.stockholm.se/NECSadcmbid/authenticate/NECSadcmbid"
 SAML2SSO = f"{SITEMINDER}/affwebservices/public/saml2sso"
+HUB_BASE = "https://hub.infomentor.se"
 
 
 def _saml2sso_redirect():
@@ -149,7 +149,7 @@ class TestBankIDInteractive(unittest.IsolatedAsyncioTestCase):
     async def test_interactive_chain_returns_samlresponse(self):
         driver = BankIDDriver(poll_interval=0)
         init_json, init_cookies = _initialize_json()
-        saml_body = _samlresponse_form()
+        _samlresponse_form()
 
         routes = [
             # login.ashx -> saml2sso
@@ -202,7 +202,7 @@ class TestBankIDInteractive(unittest.IsolatedAsyncioTestCase):
              lambda m, u, b: FakeResponse(302, "", headers={"location": "https://login003.stockholm.se"})),
             (lambda m, u, b: "authenticate/NECSadcmbid" in u and "initialize" in u,
              lambda m, u, b: FakeResponse(200, init_json,
-                                          headers={"content-type": "application/json"}, set_cookies=init_cookies)),
+                                           headers={"content-type": "application/json"}, set_cookies=init_cookies)),
             (lambda m, u, b: "authenticate/NECSadcmbid" in u and "verifyorder" not in u and "SiteMinderAuthADC" not in u,
              lambda m, u, b: FakeResponse(200, "<html>qr page</html>")),
             (lambda m, u, b: "verifyorder=" in u, lambda m, u, b: FakeResponse(200, "denied")),
@@ -210,6 +210,55 @@ class TestBankIDInteractive(unittest.IsolatedAsyncioTestCase):
         mock = MockDriver(routes)
         with self.assertRaises(BankIDDenied):
             await driver.run(mock, progress=None)
+
+    async def test_post_saml_response_samlresponse_branch_no_crash(self):
+        """saml_response-grenen: SAMLResponse POST:ad, omdirigering följs relativt svars-URL:n.
+
+        Regression: tidigare UnboundLocalError på start_url i grenen utan smsession —
+        grenen måste bygga nästa mål relativt SAMLResponse-svaret (svars-URL:n), inte
+        start_url (som bara sätts i tyst-grenen). Kör en minimal kedja:
+        POST -> omdirigering -> oauth/login (forceOAuth) -> IMHome. Hopp 4 stubbas.
+        """
+        import unittest.mock
+
+        driver = BankIDDriver(poll_interval=0)
+
+        def _login_ashx(method, url, body):
+            # POST SAMLResponse -> omdirigering mot hubb-sidan (svaret bär nästa mål).
+            return FakeResponse(302, "", headers={"location": f"{HUB_BASE}/"})
+
+        routes = [
+            # login.ashx (POST SAMLResponse) -> hub root
+            (lambda m, u, b: "login.ashx" in u, _login_ashx),
+            # hub root -> omdirigering mot oauth/login
+            (lambda m, u, b: u.startswith(HUB_BASE),
+             lambda m, u, b: FakeResponse(302, "",
+                 headers={"location": f"{HUB_BASE}/authentication/authentication/login?forceOAuth=true"})),
+        ]
+
+        captured = {}
+
+        async def _stub_submit(do_request, request_token_url, headers_for):
+            from custom_components.infomentor.token_client import CookieJar
+            captured["url"] = request_token_url
+            jar = CookieJar()
+            # IMHome sätts i hop 4 — stubben representerar LoginCallback-svaret.
+            jar.set_from_header("IMHome=imhome-1; Path=/", "https://hub.infomentor.se")
+            return jar
+
+        jar_holder = {"obj": None}
+        mock = MockDriver(routes)
+
+        with unittest.mock.patch(
+            "custom_components.infomentor.token_client._oauth_submit_to_callback",
+            _stub_submit,
+        ):
+            jar_holder["obj"] = await driver.post_saml_response(mock, saml_response="ENCODED-ASSERT")
+
+        # Grenen nådde hop 4 med forceOAuth-URL:n (ingen UnboundLocalError vid hop 2-3).
+        self.assertIn("forceOAuth", captured["url"])
+        self.assertIsNotNone(jar_holder["obj"])
+        self.assertTrue(jar_holder["obj"].has("IMHome"))
 
     async def test_interactive_timeout_raises(self):
         driver = BankIDDriver(poll_interval=0)
@@ -292,6 +341,17 @@ class TestBankIDHelpers(unittest.TestCase):
     def test_verifyorder_approved_empty_body_is_pending(self):
         driver = BankIDDriver()
         self.assertEqual(driver._verifyorder_approved("", 200), "pending")
+
+    def test_urlencode_saml_response_escapes_reserved_chars(self):
+        """Base64 kan ha +, /, = — dessa måste percent-erkodas så kroppen inte bryts."""
+        encoded = BankIDDriver._urlencode_saml_response(
+            "PHJzb3D+/base64=value=with/special/chars"
+        )
+        # + -> %2B, / -> %2F, = -> %3D, men SAMLResponse-nyckeln och = somparator står.
+        self.assertIn("SAMLResponse=", encoded)
+        self.assertNotIn("encoded/with/", encoded)
+        self.assertIn("%2B", encoded)
+        self.assertIn("%2F", encoded)
 
 
 if __name__ == "__main__":

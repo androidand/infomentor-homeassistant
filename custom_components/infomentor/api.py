@@ -202,16 +202,36 @@ class InfomentorApi:
         return self.pupils
 
     async def _set_cookie_jar(self, jar: CookieJar) -> None:
-        """Kopiera bridge-jarens cookies till HAs session så hubb-anropen bär dem."""
-        cookies = {}
+        """Kopiera bridge-jarens cookies till HAs session så hubb-anropen bär dem.
+
+        Bygger en aiohttp.SimpleCookie per cookie med rätt domän, stig och secure-flagga
+        så aiohttp matchar cookies mot hubb-anropen lika noggrant som bridge-jaren — inte
+        bara på namn=värde (vilket skulle lämna domän och stig ohanterade).
+        """
+        import http.cookies
+
+        morsels: http.cookies.SimpleCookie = http.cookies.SimpleCookie()
         for cookie in jar.all():
-            name = cookie["name"]
-            value = cookie["value"]
-            domain = cookie.get("domain", "")
-            # aiohttp matchar på host; lagra domänen som cookie-domain (utan punkt).
-            host = domain[1:] if domain.startswith(".") else domain
-            cookies[f"{name}={value}"] = {"domain": host}
-        self._session.cookie_jar.update_cookies(cookies)
+            morsel = http.cookies.Morsel()
+            morsel.set(cookie["name"], cookie["value"], "")
+            domain = cookie.get("domain", "") or ""
+            if domain:
+                # aiohttp matchar på host; ta bort ledande punkt så domänen är läsbar.
+                morsel["Domain"] = domain[1:] if domain.startswith(".") else domain
+            if cookie.get("path"):
+                morsel["Path"] = cookie["path"]
+            if cookie.get("secure"):
+                morsel["Secure"] = True
+            if cookie.get("expires"):
+                import contextlib
+                import email.utils
+
+                with contextlib.suppress(TypeError, ValueError):
+                    morsel["Expires"] = email.utils.formatdate(
+                        cookie["expires"], usegmt=True
+                    )
+            morsels[cookie["name"]] = morsel
+        self._session.cookie_jar.update_cookies(morsels)
 
 
     # ------------------------------------------------------------- transport

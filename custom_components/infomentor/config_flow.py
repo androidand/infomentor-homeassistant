@@ -16,7 +16,12 @@ from .api import (
     InvalidAuth,
     RevokedAuth,
 )
-from .bankid import BankIDDenied, BankIDError, BankIDPageChanged, BankIDTimeout
+from .bankid import (
+    BankIDDenied,
+    BankIDError,
+    BankIDPageChanged,
+    BankIDTimeout,
+)
 from .const import (
     CONF_ENABLE_LUNCH,
     CONF_MATEO_UNIT,
@@ -89,10 +94,19 @@ async def _validate_bankid(
         api = InfomentorApi(session)
 
         async def _progress(step):
+            # Bygg en beskrivning som bär QR-kod/autostart så UI:t kan visa dem.
+            description = step.message
+            parts = []
+            if step.autostart_url:
+                parts.append(f"Autostart: {step.autostart_url}")
+            if description:
+                parts.append(description)
+            if step.qrcode_url:
+                parts.append(f"QR: {step.qrcode_url}")
             await show_progress(
                 progress_action=step.action,
                 progress_task=step.task,
-                description=step.message,
+                description="\n".join(p for p in parts if p),
                 item_number=0,
             )
 
@@ -289,6 +303,12 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
                     refresh_token = user_input[CONF_REFRESH_TOKEN].strip()
                     _pupils, rotated = await _validate_refresh_token(self.hass, refresh_token)
                     data_updates[CONF_REFRESH_TOKEN] = rotated
+                elif auth_mode == "bankid":
+                    _pupils = await _validate_bankid(
+                        self.hass,
+                        user_input.get("idp", IDP_STOCKHOLM_PAR),
+                        self.async_show_progress,
+                    )
                 else:
                     username = user_input[CONF_USERNAME].strip()
                     await _validate_credentials(self.hass, username, user_input[CONF_PASSWORD])
@@ -296,6 +316,8 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth"
             except CannotConnect:
                 errors["base"] = "cannot_connect"
+            except BankIDError as err:
+                errors["base"] = str(err)
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Oväntat fel vid om-auth")
                 errors["base"] = "unknown"
@@ -312,6 +334,16 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
                         vol.Required(CONF_REFRESH_TOKEN): selector.TextSelector(
                             selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                         ),
+                    }
+                ),
+                errors=errors,
+            )
+        if auth_mode == "bankid":
+            return self.async_show_form(
+                step_id="bankid",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required("idp", default=entry.data.get("idp", IDP_STOCKHOLM_PAR)): str,
                     }
                 ),
                 errors=errors,

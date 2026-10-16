@@ -40,7 +40,7 @@ def entry(hass: HomeAssistant) -> ConfigEntry:
     """En config-post med en refresh-token."""
     return ConfigEntry(
         created_at=None,
-        data={"refresh_token": "old-refresh-token"},
+        data={"refresh_token": "old-refresh-token", "auth_mode": "token"},
         disabled_by=None,
         discovery_keys={},
         domain=DOMAIN,
@@ -107,10 +107,48 @@ async def test_no_refresh_token_reauth(hass, entry: ConfigEntry) -> None:
     coord._lock = __import__("asyncio").Lock()
     coord.api.async_login_with_token = AsyncMock(return_value=[])
 
-    entry.__dict__["data"] = {}
+    entry.__dict__["data"] = {"auth_mode": "token"}
 
     with pytest.raises(ConfigEntryAuthFailed):
         await coord._login()
+
+
+async def test_password_mode_dispatches_async_login(hass) -> None:
+    """auth_mode=password använder async_login, aldrig token-flödet."""
+    from custom_components.infomentor.coordinator import InfomentorCoordinator
+
+    entry = ConfigEntry(
+        created_at=None,
+        data={"username": "user@example.com", "password": "x", "auth_mode": "password"},
+        disabled_by=None,
+        discovery_keys={},
+        domain=DOMAIN,
+        entry_id="pw-entry",
+        minor_version=2,
+        options={},
+        source="user",
+        state="not_loaded",
+        subentries_data=[],
+        title="InfoMentor",
+        unique_id="user@example.com",
+        version=2,
+    )
+    coord = InfomentorCoordinator.__new__(InfomentorCoordinator)
+    coord.entry = entry
+    coord._lock = None
+    coord.api = MagicMock()
+    coord._ok_calls = 0
+    coord._auth_skips = 0
+    coord._refresh_inflight = None
+    coord._plan_details = {}
+    coord._plan_ids_seen = set()
+    coord.hass = hass
+    coord.api.async_login = AsyncMock(return_value=[{"id": "1"}])
+
+    await coord._login()
+    coord.api.async_login.assert_awaited_once()
+    # Token-vägen får inte anropas i password-läge.
+    coord.api.async_login_with_token.assert_not_called()
 
 
 async def test_two_updates_race_make_one_request(hass, entry: ConfigEntry) -> None:
