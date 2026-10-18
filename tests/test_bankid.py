@@ -359,6 +359,27 @@ class TestPairAppToken(unittest.IsolatedAsyncioTestCase):
             await pair_app_token(do_request, CookieJar(), device_identifier="0" * 16)
 
 
+class TestOauthTokenPost(unittest.IsolatedAsyncioTestCase):
+    async def test_oauth_token_is_form_encoded(self):
+        from custom_components.infomentor.token_client import _oauth_submit_to_callback
+
+        calls = []
+
+        async def do_request(method, url, body=None, headers=None):
+            calls.append((method, str(url), body))
+            if method == "POST":
+                return FakeResponse(302, "", location="/cb")
+            if str(url).endswith("/cb"):
+                return FakeResponse(200, "", set_cookies=["IMHome=1; Path=/"])
+            return FakeResponse(200, "<form action='/submit'><input name='oauth_token' value='a+b/c='></form>")
+
+        await _oauth_submit_to_callback(
+            do_request, request_token_url="https://hub.infomentor.se/page", headers_for=lambda u: {}
+        )
+        post = next(c for c in calls if c[0] == "POST")
+        self.assertEqual(post[2], "oauth_token=a%2Bb%2Fc%3D")
+
+
 class TestHelpers(unittest.TestCase):
     def test_extract_saml_response_form(self):
         value = BankIDDriver._extract_saml_response_form(ASSERTION, "https://x")

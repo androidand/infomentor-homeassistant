@@ -468,6 +468,8 @@ async def _oauth_submit_to_callback(
     headers_for (Bearer eller IdP-cookie); sätter IMHome i en jar på
     LoginCallback-hoppet. Använder samma hopphandtering som bridge_web_session.
     """
+    import urllib.parse
+
     if jar is None:
         jar = CookieJar()
 
@@ -498,7 +500,7 @@ async def _oauth_submit_to_callback(
         "POST",
         submit_url,
         {**headers_for(submit_url), "Content-Type": "application/x-www-form-urlencoded"},
-        f"oauth_token={oauth_token}",
+        urllib.parse.urlencode({"oauth_token": oauth_token}),
     )
     _absorb_cookies(resp, submit_url, jar)
     try:
