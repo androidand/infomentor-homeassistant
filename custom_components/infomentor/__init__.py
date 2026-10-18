@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
@@ -33,7 +35,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = InfomentorCoordinator(hass, entry, session)
     await coordinator.async_config_entry_first_refresh()
 
-    entry.runtime_data = InfomentorRuntimeData(coordinator=coordinator, session=session)
+    entry.runtime_data = InfomentorRuntimeData(
+        coordinator=coordinator, session=session, snapshot=_without_token(entry.data)
+    )
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -47,23 +51,23 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unloaded
 
 
+def _without_token(data: Mapping[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in data.items() if k != CONF_REFRESH_TOKEN}
+
+
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Ladda om när inställningarna ändras.
 
-    En roterande refresh-token uppdateras ofta (per update) och ska *inte* starta om
-    integrationen — det stänger den session vi bara byggt. Hoppar över när enda
-    skillnaden mot den senast kända posten är refresh-token-värdet; alla andra
-    ändringar (intervall, skolmat, namn, inloggningsuppgifter) ladda däremot om.
+    En roterande refresh-token uppdateras vid varje inloggning och ska *inte* starta om
+    integrationen, för det stänger den session vi just byggt. Jämför därför med det som
+    gällde vid uppsättningen (utan token); alla andra ändringar laddar om, en gång.
     """
-    prev = getattr(entry, "_last_snapshot_data", None)
-    # Jämför utan token — är enda skillnaden refresh-token, behåll sessionen.
-    without_token = {k: v for k, v in entry.data.items() if k != CONF_REFRESH_TOKEN}
-    entry._last_snapshot_data = dict(entry.data)
-    if prev is not None:
-        prev_without_token = {k: v for k, v in prev.items() if k != CONF_REFRESH_TOKEN}
-        if prev_without_token == without_token:
+    runtime = getattr(entry, "runtime_data", None)
+    now = _without_token(entry.data)
+    if runtime is not None:
+        if runtime.snapshot == now:
             return
-    await hass.config_entries.async_reload(entry.entry_id)
+        runtime.snapshot = now
     await hass.config_entries.async_reload(entry.entry_id)
 
 
@@ -73,3 +77,5 @@ class InfomentorRuntimeData:
 
     coordinator: InfomentorCoordinator
     session: aiohttp.ClientSession
+    # Posten utan token vid uppsättningen: skiljer en token-rotation från en riktig ändring.
+    snapshot: dict[str, Any]

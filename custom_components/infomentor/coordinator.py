@@ -96,6 +96,8 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
         self._ok_calls = 0
         self._auth_skips = 0
         self._refresh_inflight: asyncio.Future[None] | None = None
+        # Delar hubben redan avvisat medan sessionen levde (se _safe); loggas bara en gång.
+        self._not_permitted: set[str] = set()
         # planerings-id -> {"at": monotonic(), "info": {...}}
         self._plan_details: dict[str, dict[str, Any]] = {}
         self._plan_ids_seen: set[str] = set()
@@ -372,9 +374,15 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
         except CannotConnect:
             raise
         except InvalidAuth as err:
-            if strict:
+            if strict and self._ok_calls == 0:
+                # Inget har gått igenom ännu: sessionen kan vara död, logga in igen.
                 raise
-            _LOGGER.warning("InfoMentor: %s avvisades (%s) – hoppar över", label, err)
+            # Andra anrop i samma omgång gick igenom, så sessionen lever och just den här
+            # delen är inte tillåten för användaren (alla barn och skolor har inte alla
+            # funktioner). Hoppa över den; en ny inloggning hjälper inte.
+            level = logging.DEBUG if label in self._not_permitted else logging.WARNING
+            _LOGGER.log(level, "InfoMentor: %s är inte tillåten här – hoppar över (%s)", label, err)
+            self._not_permitted.add(label)
             self._auth_skips += 1
             return default
         except (ApiError, InfomentorError) as err:

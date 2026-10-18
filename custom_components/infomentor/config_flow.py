@@ -301,16 +301,15 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         entry = self._get_reauth_entry()
         errors: dict[str, str] = {}
         auth_mode = entry.data.get(CONF_AUTH_MODE, "password")
+        if auth_mode in ("token", "bankid"):
+            # BankID ger en ny token direkt; att klistra in en finns kvar som alternativ.
+            return self.async_show_menu(
+                step_id="reauth_confirm", menu_options=["bankid", "reauth_token"]
+            )
         if user_input is not None:
-            data_updates = dict(user_input)
             try:
-                if auth_mode == "token":
-                    refresh_token = user_input[CONF_REFRESH_TOKEN].strip()
-                    _pupils, rotated = await _validate_refresh_token(self.hass, refresh_token)
-                    data_updates[CONF_REFRESH_TOKEN] = rotated
-                else:
-                    username = user_input[CONF_USERNAME].strip()
-                    await _validate_credentials(self.hass, username, user_input[CONF_PASSWORD])
+                username = user_input[CONF_USERNAME].strip()
+                await _validate_credentials(self.hass, username, user_input[CONF_PASSWORD])
             except (InvalidAuth, RevokedAuth):
                 errors["base"] = "invalid_auth"
             except CannotConnect:
@@ -319,25 +318,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
                 _LOGGER.exception("Oväntat fel vid om-auth")
                 errors["base"] = "unknown"
             else:
-                return self.async_update_reload_and_abort(
-                    entry,
-                    data_updates=data_updates,
-                )
-        if auth_mode == "token":
-            return self.async_show_form(
-                step_id="reauth_token",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required(CONF_REFRESH_TOKEN): selector.TextSelector(
-                            selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
-                        ),
-                    }
-                ),
-                errors=errors,
-            )
-        if auth_mode == "bankid":
-            self._bankid = None
-            return await self.async_step_bankid()
+                return self.async_update_reload_and_abort(entry, data_updates=dict(user_input))
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=vol.Schema(
@@ -354,6 +335,39 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
     @staticmethod
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
         return InfomentorOptionsFlow()
+
+    async def async_step_reauth_token(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Om-auth genom att klistra in en ny app-token."""
+        entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                refresh_token = user_input[CONF_REFRESH_TOKEN].strip()
+                _pupils, rotated = await _validate_refresh_token(self.hass, refresh_token)
+            except (InvalidAuth, RevokedAuth):
+                errors["base"] = "invalid_auth"
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Oväntat fel vid om-auth")
+                errors["base"] = "unknown"
+            else:
+                return self.async_update_reload_and_abort(
+                    entry, data_updates={CONF_REFRESH_TOKEN: rotated, CONF_AUTH_MODE: "token"}
+                )
+        return self.async_show_form(
+            step_id="reauth_token",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_REFRESH_TOKEN): selector.TextSelector(
+                        selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                    ),
+                }
+            ),
+            errors=errors,
+        )
 
 
 class InfomentorOptionsFlow(OptionsFlow):

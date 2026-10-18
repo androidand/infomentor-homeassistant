@@ -82,6 +82,10 @@ class RevokedAuth(InfomentorError):
     """
 
 
+# Hubbens svar när ett anrop inte är tillåtet för användaren (eller sessionen dött).
+UNAUTHORIZED_HANDLER = "/Home/Home/HandleUnauthorizedRequest"
+
+
 def new_raw_cookie_session() -> aiohttp.ClientSession:
     """En session utan egen cookie-jar, för flöden som hanterar cookies själva.
 
@@ -215,8 +219,11 @@ class InfomentorApi:
         try:
             jar = await bridge_web_session(api_request, token["access_token"])
         except TokenError as err:
-            await self._close_auxiliary_session()
             raise ApiError(str(err)) from err
+        finally:
+            # Bridge-sessionen behövs inte längre när jar:t är byggt; lämnas den öppen
+            # läcker en session per inloggning.
+            await self._close_auxiliary_session()
 
         # 3. Använd jar:t mot hubben: ren cookie-jar, hämta hubben (sätter IMHome-synliggörelse)
         #    och plocka ut barnen.
@@ -340,7 +347,11 @@ class InfomentorApi:
             _LOGGER.warning(
                 "InfoMentor: %s svarade %s → %s", path, status, target.replace(HUB_BASE, "")
             )
-            if location and not _retried:
+            # HandleUnauthorizedRequest är hubbens utloggningshanterare: att följa den förstör
+            # sessionen, så en ny inloggning direkt efter (sett live) avvisas. En endpoint
+            # som en användare inte får använda omdirigerar dit lika gärna som en död
+            # session, så den följs aldrig.
+            if location and not _retried and UNAUTHORIZED_HANDLER not in target:
                 await self._follow(target)
                 return await self._post_hub(path, body, _retried=True, empty_ok=empty_ok)
             raise InvalidAuth(f"{path} omdirigerade till {target}")
