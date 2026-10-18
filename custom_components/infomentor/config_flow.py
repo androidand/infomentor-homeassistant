@@ -127,6 +127,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         super().__init__()
         self._bankid: BankIdLogin | None = None
         self._bankid_error = "unknown"
+        self._bankid_detail = ""
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Meny: välj app-token (rekommenderat) eller användarnamn/lösenord."""
@@ -187,6 +188,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         login, self._bankid = self._bankid, None
         if login is None or login.error or login.outcome is None:
             self._bankid_error = (login.error if login else None) or "unknown"
+            self._bankid_detail = login.detail if login else ""
             return await self.async_step_bankid_retry()
         pupils, refresh_token = login.outcome
         if self.source == SOURCE_REAUTH:
@@ -215,6 +217,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="bankid_retry",
             data_schema=vol.Schema({}),
             errors={"base": self._bankid_error},
+            description_placeholders={"detail": self._bankid_detail},
         )
 
     @callback

@@ -398,3 +398,38 @@ async def test_each_bankid_failure_gets_its_own_message(raised: str, key: str) -
     login = BankIdLogin(hass, run)
     await login._task
     assert login.error == key
+
+
+async def test_the_failure_detail_says_what_the_order_did_and_how_it_ended() -> None:
+    """Utan detaljen går det inte att skilja "ingen skannade" från "skannade men fick fel"."""
+    from unittest.mock import MagicMock
+
+    from custom_components.infomentor.bankid import BankIDError, BankIDStep
+    from custom_components.infomentor.bankid_session import BankIdLogin
+
+    hass = MagicMock()
+    hass.async_create_task = asyncio.ensure_future
+
+    async def run(progress):
+        await progress(BankIDStep("a", qr_data="q1", state="PENDING"))
+        await progress(BankIDStep("a", qr_data="q2", state="PENDING"))
+        await progress(BankIDStep("b", qr_data="q3", state="USER_SIGN"))
+        raise BankIDError("BankID slutade i läget ERROR efter https://x.example/a?b=secret")
+
+    login = BankIdLogin(hass, run)
+    await login._task
+    assert login.error == "bankid_failed"
+    assert login.detail == "Sett: PENDING → USER_SIGN. Slut: BankIDError: BankID slutade i läget ERROR efter <url>"
+
+
+async def test_the_retry_form_shows_the_detail(hass: HomeAssistant, bankid_validate) -> None:
+    from custom_components.infomentor.bankid import BankIDError
+
+    async def fake_validate(hass, idp, progress):
+        raise BankIDError("slut")
+
+    bankid_validate["fn"] = fake_validate
+    result = await _start_bankid(hass)
+    result = await _finish_bankid(hass, result["flow_id"])
+    assert result["step_id"] == "bankid_retry"
+    assert result["description_placeholders"]["detail"] == "Sett: inget. Slut: BankIDError: slut"
