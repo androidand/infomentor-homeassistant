@@ -30,9 +30,9 @@ HUB_BASE: Final = "https://hub.infomentor.se"
 MENTOR_LOGIN: Final = "https://infomentor.se/swedish/production/mentor/"
 MATEO_API: Final = "https://meny-api.mateo.se/api/v1/days"
 
-# Phase B — BankID via Stockholms stad (SiteMinder + PhenixID). SSO-starten pekar
-# på den kommun-specifika IdP-valsidan; `idp`-värdet skiljer sig mellan skolor
-# (docs/idp-federation.json, 96 inloggningar) och vissa är inte SiteMinder alls.
+# BankID via Stockholms stad (SiteMinder + PhenixID). SSO-starten pekar på den
+# kommun-specifika IdP-valsidan; `idp` skiljer sig mellan skolor och vissa är
+# inte SiteMinder alls (docs/idp-federation.json).
 SSO_LOGIN_PATH: Final = "/login.ashx"
 IDP_STOCKHOLM_PAR: Final = "stockholm_par"
 SSO_BASE: Final = "https://sso.infomentor.se"

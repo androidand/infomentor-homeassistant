@@ -6,9 +6,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A first-class Home Assistant integration for **InfoMentor** (the Swedish school
-platform, "Mentor" / "InfoMentor Hub"). It signs in with your normal
-email/password account and turns your children's school day into sensors you can
-build automations on.
+platform, "Mentor" / "InfoMentor Hub"). It signs in with BankID, an app token,
+or email/password and turns your children's school day into sensors you can build
+automations on.
 
 > ⚠️ **Unofficial and not affiliated with InfoMentor.** For personal use with
 > your own account. The API is undocumented and can change without warning —
@@ -54,26 +54,18 @@ folder and restart.
 
 ## Configuration
 
-You can sign in two ways:
+Sign in one of three ways:
 
-- **BankID (Stockholm Stad)** — scan a QR code with the BankID app, or tap the
-  link on the phone that has it. The integration then pairs itself to the
-  InfoMentor app credential and keeps only the rotating refresh token.
-- **App token** — paste the rotating refresh token that your
-  InfoMentor app (or the companion CLI) hands back after a one-time BankID
-  login. The integration stores the token (not a password) and refreshes it
-  every run.
+- **BankID (Stockholm Stad only)** — scan a QR code with the BankID app, or tap
+  the link on the phone that has it.
+- **App token** — paste the rotating refresh token that a one-time BankID login
+  hands back (from the InfoMentor app or the companion CLI).
 - **Email and password** — for municipalities that still use the classic
-  email/password account.
+  account.
 
-The integration signs in, discovers every child on the account, and creates
-the entities above.
-
-> Some municipalities use BankID/SSO instead of the email/password account. These
-> accounts log in once with BankID and hand back a rotating refresh token; this
-> integration stores that token (not a password) and refreshes it every run. The
-> refresh token is stored in plaintext in the config entry — treat the diagnostics
-> file as sensitive, since sensitive fields are already redacted.
+The integration stores the token (not a password) and refreshes it every run,
+then discovers every child on the account and creates the entities above.
+Sensitive fields are redacted in the diagnostics file.
 
 ### Options
 

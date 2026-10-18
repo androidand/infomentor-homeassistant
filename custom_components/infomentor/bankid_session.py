@@ -1,10 +1,9 @@
 """BankID-inloggningen som en bakgrundsuppgift som config-flödet kan visa live.
 
-HA:s progress-steg ritas om först när HA får veta att flödet ändrats, och HA
-märker det bara när steget körs om med nya `description_placeholders`. Därför ger
-`wait_for_change()` flödet en kortlivad uppgift som blir klar vid nästa ändring
-(ny QR-bild, nytt läge) eller när inloggningen är slut. När den är klar kör HA
-steget igen, och steget svarar med en ny uppgift och de nya placeholders.
+HA ritar om ett progress-steg först när steget körs om med nya
+`description_placeholders`. `wait_for_change()` ger därför flödet en kortlivad
+uppgift som blir klar vid nästa ändring (ny QR-bild, nytt läge) eller vid slut,
+så att steget kan köras om med de nya placeholders.
 """
 
 from __future__ import annotations
