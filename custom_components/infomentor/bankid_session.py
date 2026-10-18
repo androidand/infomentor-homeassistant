@@ -111,8 +111,12 @@ class BankIdLogin:
         link = (
             AUTOSTART_LINK.format(token=self.autostart_token) if self.autostart_token else ""
         )
-        return {
-            "message": self.message,
-            "qr_data": self.qr_data,
-            "autostart_link": link,
-        }
+        # HA:s översättningar tolkar `<tagg>` som ICU-taggar (INVALID_TAG), så elementet
+        # måste komma in som ett placeholder-värde, inte stå i översättningssträngen.
+        qr = (
+            f'<ha-qr-code data="{self.qr_data}" scale="6" margin="2" '
+            'error-correction-level="low"></ha-qr-code>'
+            if self.qr_data
+            else ""
+        )
+        return {"message": self.message, "qr_code": qr, "autostart_link": link}

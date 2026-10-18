@@ -139,7 +139,15 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema(
-                {vol.Required("method"): vol.In(["user_token", "password", "bankid"])}
+                {
+                    vol.Required("method", default="bankid"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=["bankid", "user_token", "password"],
+                            translation_key="method",
+                            mode=selector.SelectSelectorMode.LIST,
+                        )
+                    )
+                }
             ),
         )
 

@@ -239,7 +239,10 @@ async def test_bankid_progress_shows_a_refreshing_qr_and_the_same_device_link(
         assert step["progress_action"] == "bankid"
         seen.append(step["description_placeholders"])
 
-    assert [p["qr_data"] for p in seen] == ["bankid.a.0.h1", "bankid.a.1.h2", "bankid.a.2.h3"]
+    assert [p["qr_code"] for p in seen] == [
+        f'<ha-qr-code data="{qr}" scale="6" margin="2" error-correction-level="low"></ha-qr-code>'
+        for qr in ("bankid.a.0.h1", "bankid.a.1.h2", "bankid.a.2.h3")
+    ]
     assert len(refetch_events) >= 3
     assert seen[0]["autostart_link"] == "https://app.bankid.com/?autostarttoken=tok1&redirect=null"
 
@@ -318,11 +321,7 @@ def test_unsafe_qr_data_and_tokens_never_reach_the_description() -> None:
     hass.async_create_task = lambda coro: (coro.close(), MagicMock())[1]
     login = BankIdLogin(hass, lambda progress: None)
     asyncio.run(login._progress(BankIDStep("x", qr_data='a"><script>', autostart_token="t&x=1")))
-    assert login.placeholders() == {
-        "message": "x",
-        "qr_data": "",
-        "autostart_link": "",
-    }
+    assert login.placeholders() == {"message": "x", "qr_code": "", "autostart_link": ""}
     assert login.progress_action == "bankid_starting"
 
 
@@ -350,3 +349,16 @@ async def test_one_pending_wait_is_shared_until_something_changes() -> None:
     second = login.wait_for_change()
     assert second is not first
     login.cancel()
+
+
+def test_translation_strings_contain_no_html_tags() -> None:
+    """HA:s frontend tolkar <tagg> i en översättning som ICU-tagg och visar
+    "Translation error: INVALID_TAG" (sett i en riktig HA 2026.2). HTML hör hemma i
+    placeholder-värden."""
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).parent.parent / "custom_components" / "infomentor"
+    for name in ("strings.json", "translations/en.json", "translations/sv.json"):
+        text = json.dumps(json.loads((root / name).read_text()))
+        assert "<" not in text and ">" not in text, name
