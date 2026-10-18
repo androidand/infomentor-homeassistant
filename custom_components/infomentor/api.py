@@ -82,6 +82,20 @@ class RevokedAuth(InfomentorError):
     """
 
 
+def new_raw_cookie_session() -> aiohttp.ClientSession:
+    """En session utan egen cookie-jar, för flöden som hanterar cookies själva.
+
+    BankID-kedjan och token-bridgen skickar `Cookie`-huvudet explicit från en egen
+    `CookieJar`. En vanlig aiohttp-jar slår då ihop huvudet med sin egen och skriver om
+    det via `SimpleCookie`, som citerar varje värde med `/`, `+` eller `=`:
+    `Sess=ab/cd==` blir `Sess="ab/cd=="`. SiteMinders och PhenixIDs sessionscookies har
+    just de tecknen, servern känner inte igen sessionen och svarar med sidan igen i
+    stället för att omdirigera. Sett live: ordern blev OK men ingen SAML-form kom.
+    `DummyCookieJar` rör inte huvudet.
+    """
+    return aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar())
+
+
 class InfomentorApi:
     """Tunn klient mot hub.infomentor.se."""
 
@@ -122,40 +136,40 @@ class InfomentorApi:
         Kastar InvalidAuth (bridgen eller parningen avvisades), CannotConnect (nere)
         eller en översatt BankIDError (avböjt/tid ut/ändrad sida).
         """
-        # 1. Kör driver:n till SAMLResponse/SMSESSION.
+        # Alla steg som skickar `Cookie` explicit går över en session utan egen jar
+        # (se new_raw_cookie_session); bara hubbens egen session nedan behöver en riktig.
         driver = BankIDDriver()
-        do_request = self._do_request()
-        result = await driver.run(do_request, idp=idp, progress=progress)
+        self._api_session = new_raw_cookie_session()
+        raw_request = make_aiohttp_request(self._api_session)
 
-        # 2. Konvergera: driver:n POST:ar SAMLResponse -> login.ashx -> LoginCallback -> IMHome.
-        #    Använder en egen session så cookie-jaren är isolerad.
-        self._api_session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
-        api_request = make_aiohttp_request(self._api_session)
+        # 1. Kör driver:n till SAMLResponse.
         try:
-            jar = await driver.post_saml_response(
-                api_request, saml_response=result.saml_response, jar=result.jar
-            )
-        except TokenError as err:
-            await self._close_auxiliary_session()
-            raise InvalidAuth(str(err)) from err
+            result = await driver.run(raw_request, idp=idp, progress=progress)
 
-        # 3. Kör hubb-anropen med jar:t och pocka ut barnen.
-        self._session.cookie_jar.clear()
-        await self._set_cookie_jar(jar)
-        _, root = await self._follow(f"{HUB_BASE}/")
-        if "selectedPupilName" not in root:
-            await self._close_auxiliary_session()
-            raise InvalidAuth("inloggningen avvisades — BankID-svaret accepterades inte")
-        self.pupils = extract_pupils(root)
-        _LOGGER.debug("Inloggad via BankID, %d barn hittade", len(self.pupils))
+            # 2. Konvergera: driver:n POST:ar SAMLResponse -> login.ashx -> LoginCallback -> IMHome.
+            try:
+                jar = await driver.post_saml_response(
+                    raw_request, saml_response=result.saml_response, jar=result.jar
+                )
+            except TokenError as err:
+                raise InvalidAuth(str(err)) from err
 
-        # 4. Para webbsessionen till appens refresh-token (single holder, roterar).
-        try:
-            token = await pair_app_token(
-                api_request, jar, device_identifier=secrets.token_hex(8)
-            )
-        except TokenError as err:
-            raise InvalidAuth(f"parningen avvisades: {err}") from err
+            # 3. Kör hubb-anropen med jar:t och pocka ut barnen.
+            self._session.cookie_jar.clear()
+            await self._set_cookie_jar(jar)
+            _, root = await self._follow(f"{HUB_BASE}/")
+            if "selectedPupilName" not in root:
+                raise InvalidAuth("inloggningen avvisades — BankID-svaret accepterades inte")
+            self.pupils = extract_pupils(root)
+            _LOGGER.debug("Inloggad via BankID, %d barn hittade", len(self.pupils))
+
+            # 4. Para webbsessionen till appens refresh-token (single holder, roterar).
+            try:
+                token = await pair_app_token(
+                    raw_request, jar, device_identifier=secrets.token_hex(8)
+                )
+            except TokenError as err:
+                raise InvalidAuth(f"parningen avvisades: {err}") from err
         finally:
             await self._close_auxiliary_session()
         return self.pupils, token["refresh_token"]
@@ -196,7 +210,7 @@ class InfomentorApi:
         # 2. Byt access-token mot en hub-cookie-jar med IMHome. Använd en egen session
         #    så cookie-jaren är isolerad (bridge sätter cookies per domän); den stängs
         #    efteråt. Kastar TokenError om kedjan misslyckas (t.ex. förlorad trailing slash).
-        self._api_session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
+        self._api_session = new_raw_cookie_session()
         api_request = make_aiohttp_request(self._api_session)
         try:
             jar = await bridge_web_session(api_request, token["access_token"])
