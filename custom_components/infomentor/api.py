@@ -22,7 +22,6 @@ from .bankid import BankIDDriver
 from .const import HUB_BASE, MATEO_API, MENTOR_LOGIN
 from .token_client import (
     Blocked,
-    CookieJar,
     NetworkError,
     TokenError,
     TokenRevoked,
@@ -40,6 +39,7 @@ from .util import (
     hidden_input,
     hidden_inputs,
 )
+from .web import CookieJar
 
 _LOGGER = logging.getLogger(__name__)
 
