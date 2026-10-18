@@ -18,7 +18,7 @@
       },
       "bankid_retry": {
         "title": "BankID login failed",
-        "description": "Press Submit to start a new BankID login."
+        "description": "{detail}\n\nPress Submit to start a new BankID login."
       },
       "password": {
         "title": "Email and password",

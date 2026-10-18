@@ -38,6 +38,22 @@ _SAFE = re.compile(r"^[A-Za-z0-9._\-]{1,512}$")
 AUTOSTART_LINK = "https://app.bankid.com/?autostarttoken={token}&redirect=null"
 
 
+def _error_key(err: Exception) -> str:
+    if isinstance(err, BankIDDenied):
+        return "bankid_denied"
+    if isinstance(err, BankIDTimeout):
+        return "bankid_timeout"
+    if isinstance(err, BankIDPageChanged):
+        return "bankid_page_changed"
+    if isinstance(err, BankIDError):
+        return "bankid_failed"
+    if isinstance(err, InvalidAuth):
+        return "invalid_auth"
+    if isinstance(err, CannotConnect):
+        return "cannot_connect"
+    return "unknown"
+
+
 class BankIdLogin:
     """Kör `run(progress)` i bakgrunden och samlar det UI:t ska visa."""
 
@@ -50,12 +66,16 @@ class BankIdLogin:
         self.qr_data = ""
         self.autostart_token = ""
         self.error: str | None = None
+        self.detail = ""
+        self._seen: list[str] = []
         self.outcome: Any = None
         self._changed = asyncio.Event()
         self._waiter: asyncio.Task[None] | None = None
         self._task = hass.async_create_task(self._main(run))
 
     async def _progress(self, step: BankIDStep) -> None:
+        if not self._seen or self._seen[-1] != step.state:
+            self._seen.append(step.state)
         self.message = step.message
         if step.qr_data and _SAFE.match(step.qr_data):
             self.qr_data = step.qr_data
@@ -66,25 +86,23 @@ class BankIdLogin:
     async def _main(self, run: Callable[..., Awaitable[Any]]) -> None:
         try:
             self.outcome = await run(self._progress)
-        except BankIDDenied:
-            self.error = "bankid_denied"
-        except BankIDTimeout:
-            self.error = "bankid_timeout"
-        except BankIDPageChanged:
-            self.error = "bankid_page_changed"
-        except BankIDError:
-            self.error = "bankid_failed"
-        except InvalidAuth:
-            self.error = "invalid_auth"
-        except CannotConnect:
-            self.error = "cannot_connect"
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception("Oväntat fel vid BankID-inloggning")
-            self.error = "unknown"
+        except Exception as err:  # noqa: BLE001
+            self.error = _error_key(err)
+            self.detail = self._describe(err)
+            if self.error == "unknown":
+                _LOGGER.exception("Oväntat fel vid BankID-inloggning")
+            else:
+                _LOGGER.warning("BankID-inloggningen slutade: %s", self.detail)
         finally:
             self._changed.set()
+
+    def _describe(self, err: Exception) -> str:
+        """Vad ordern hann göra och hur den slutade, utan länkar, till retry-formuläret."""
+        seen = " → ".join(self._seen) or "inget"
+        ended = re.sub(r"https?://\S+", "<url>", f"{type(err).__name__}: {err}")[:200]
+        return f"Sett: {seen}. Slut: {ended}"
 
     @property
     def done(self) -> bool:

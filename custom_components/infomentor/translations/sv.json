@@ -18,7 +18,7 @@
       },
       "bankid_retry": {
         "title": "BankID-inloggningen misslyckades",
-        "description": "Tryck på Skicka för att starta en ny BankID-inloggning."
+        "description": "{detail}\n\nTryck på Skicka för att starta en ny BankID-inloggning."
       },
       "password": {
         "title": "E-post och lösenord",
