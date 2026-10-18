@@ -15,6 +15,10 @@ CONF_SCAN_INTERVAL: Final = "scan_interval"
 CONF_ENABLE_LUNCH: Final = "enable_lunch"
 CONF_MATEO_UNIT: Final = "mateo_unit_id"
 CONF_NAMES: Final = "names"
+CONF_USERNAME: Final = "username"
+CONF_PASSWORD: Final = "password"
+CONF_REFRESH_TOKEN: Final = "refresh_token"
+CONF_AUTH_MODE: Final = "auth_mode"
 
 DEFAULT_SCAN_INTERVAL_MIN: Final = 20
 MIN_SCAN_INTERVAL_MIN: Final = 5
@@ -25,6 +29,15 @@ DEFAULT_SCAN_INTERVAL: Final = timedelta(minutes=DEFAULT_SCAN_INTERVAL_MIN)
 HUB_BASE: Final = "https://hub.infomentor.se"
 MENTOR_LOGIN: Final = "https://infomentor.se/swedish/production/mentor/"
 MATEO_API: Final = "https://meny-api.mateo.se/api/v1/days"
+
+# Phase B — BankID via Stockholms stad (SiteMinder + PhenixID). SSO-starten pekar
+# på den kommun-specifika IdP-valsidan; `idp`-värdet skiljer sig mellan skolor
+# (docs/idp-federation.json, 96 inloggningar) och vissa är inte SiteMinder alls.
+SSO_LOGIN_PATH: Final = "/login.ashx"
+IDP_STOCKHOLM_PAR: Final = "stockholm_par"
+SSO_BASE: Final = "https://sso.infomentor.se"
+PHENIXID_BASE: Final = "https://login003.stockholm.se"
+SITEMINDER_BASE: Final = "https://login001.stockholm.se"
 
 ATTR_PUPILS: Final = "pupils"
 ATTR_ATTRIBUTION: Final = "Data från InfoMentor"

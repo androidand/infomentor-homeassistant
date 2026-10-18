@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 from datetime import date, timedelta
 from time import time
 from typing import Any
@@ -17,7 +18,21 @@ from typing import Any
 import aiohttp
 from yarl import URL
 
+from .bankid import BankIDDriver
 from .const import HUB_BASE, MATEO_API, MENTOR_LOGIN
+from .token_client import (
+    Blocked,
+    CookieJar,
+    NetworkError,
+    TokenError,
+    TokenRevoked,
+    bridge_web_session,
+    make_aiohttp_request,
+    pair_app_token,
+)
+from .token_client import (
+    refresh_token as app_refresh_token,
+)
 from .util import (
     extract_oauth_token,
     extract_pupils,
@@ -59,14 +74,179 @@ class ApiError(InfomentorError):
     """
 
 
+class RevokedAuth(InfomentorError):
+    """Token eller session är ogiltig (REVOKED): starta reauth.
+
+    Skiljs medvetet från InvalidAuth så att koordinatorn kan skilja token-fel
+    (reauth) från WAF/F5-blip (BLOCKED, försök igen, aldrig reauth).
+    """
+
+
 class InfomentorApi:
     """Tunn klient mot hub.infomentor.se."""
 
-    def __init__(self, session: aiohttp.ClientSession, username: str, password: str) -> None:
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> None:
         self._session = session
         self._username = username
         self._password = password
+        self._api_session: aiohttp.ClientSession | None = None
         self.pupils: list[dict[str, Any]] = []
+
+    def _do_request(self):
+        """Binder aiohttp-session till token_clients do_request-kontrakt."""
+        return make_aiohttp_request(self._session)
+
+    async def _close_auxiliary_session(self) -> None:
+        """Stäng en tillfällig session som skapats av bridge, om det finns."""
+        if self._api_session is not None:
+            await self._api_session.close()
+            self._api_session = None
+
+    async def async_login_with_bankid(
+        self, *, idp: str = "stockholm_par", progress: Any | None = None
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Inloggning med interaktiv BankID (Phase B: Stockholm Stad).
+
+        Kör driver:n (bankid.py) som styr SiteMinder + PhenixID till en
+        SAMLResponse/SMSESSION, byter sedan den mot en hub-cookie-jar med IMHome
+        via `bridge_web_session` (login.ashx -> LoginCallback -> IMHome). Används
+        i config-flödet som ett progress-steg. Webbsessionen räcker bara ~40 min, så
+        därefter parar vi den till appens roterande refresh-token, den hållbara
+        uppgiften, som returneras tillsammans med barnen: (barn, refresh_token).
+
+        Kastar InvalidAuth (bridgen eller parningen avvisades), CannotConnect (nere)
+        eller en översatt BankIDError (avböjt/tid ut/ändrad sida).
+        """
+        # 1. Kör driver:n till SAMLResponse/SMSESSION.
+        driver = BankIDDriver()
+        do_request = self._do_request()
+        result = await driver.run(do_request, idp=idp, progress=progress)
+
+        # 2. Konvergera: driver:n POST:ar SAMLResponse -> login.ashx -> LoginCallback -> IMHome.
+        #    Använder en egen session så cookie-jaren är isolerad.
+        self._api_session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
+        api_request = make_aiohttp_request(self._api_session)
+        try:
+            jar = await driver.post_saml_response(
+                api_request, saml_response=result.saml_response, jar=result.jar
+            )
+        except TokenError as err:
+            await self._close_auxiliary_session()
+            raise InvalidAuth(str(err)) from err
+
+        # 3. Kör hubb-anropen med jar:t och pocka ut barnen.
+        self._session.cookie_jar.clear()
+        await self._set_cookie_jar(jar)
+        _, root = await self._follow(f"{HUB_BASE}/")
+        if "selectedPupilName" not in root:
+            await self._close_auxiliary_session()
+            raise InvalidAuth("inloggningen avvisades — BankID-svaret accepterades inte")
+        self.pupils = extract_pupils(root)
+        _LOGGER.debug("Inloggad via BankID, %d barn hittade", len(self.pupils))
+
+        # 4. Para webbsessionen till appens refresh-token (single holder, roterar).
+        try:
+            token = await pair_app_token(
+                api_request, jar, device_identifier=secrets.token_hex(8)
+            )
+        except TokenError as err:
+            raise InvalidAuth(f"parningen avvisades: {err}") from err
+        finally:
+            await self._close_auxiliary_session()
+        return self.pupils, token["refresh_token"]
+
+    async def async_login_with_token(
+        self, refresh_token: str, *, on_rotated=None
+    ) -> list[dict[str, Any]]:
+        """Inloggning med den hållbara appens refresh-token (BankID-givna).
+
+        Friskar token, byter den via hub-bridgen till en ny IMHome-cookie-jar och
+        kör sedan de befintliga hubb-anropen som plockar ut barnen. Den tillfälliga
+        sessionen som bridge använder stängs efteråt; hubb-sessionen bär imHome-cookien.
+
+        `on_rotated` anropas, om given, med den roterade refresh-token så att en ägare
+        kan skriva tillbaka den (kordinatorns lock garanterar en ägare).
+
+        Kastar RevokedAuth (token död -> reauth), ApiError (bridgen misslyckades) eller
+        CannotConnect (nere). BLOCKED/F5 och nätverksfel höjs som UpdateFailed av
+        koordinatorn, aldrig som reauth.
+        """
+        do_request = self._do_request()
+
+        # 1. Friska token — detta rotar om refresh-token. Kastar TokenRevoked (reauth),
+        #    Blocked (F5/Framända, försök igen) eller NetworkError (nere).
+        try:
+            token = await app_refresh_token(do_request, refresh_token)
+        except TokenRevoked as err:
+            raise RevokedAuth(str(err)) from err
+        except (Blocked, NetworkError) as err:
+            raise CannotConnect(str(err)) from err
+
+        # Roteringen är känd före bridge; rapportera den så ägaren kan spara den
+        # innan något mer kan misslyckas (persist-before-use).
+        rotated = token.get("refresh_token")
+        if rotated and rotated != refresh_token and on_rotated is not None:
+            on_rotated(rotated)
+
+        # 2. Byt access-token mot en hub-cookie-jar med IMHome. Använd en egen session
+        #    så cookie-jaren är isolerad (bridge sätter cookies per domän); den stängs
+        #    efteråt. Kastar TokenError om kedjan misslyckas (t.ex. förlorad trailing slash).
+        self._api_session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
+        api_request = make_aiohttp_request(self._api_session)
+        try:
+            jar = await bridge_web_session(api_request, token["access_token"])
+        except TokenError as err:
+            await self._close_auxiliary_session()
+            raise ApiError(str(err)) from err
+
+        # 3. Använd jar:t mot hubben: ren cookie-jar, hämta hubben (sätter IMHome-synliggörelse)
+        #    och plocka ut barnen.
+        self._session.cookie_jar.clear()
+        await self._set_cookie_jar(jar)
+        _, root = await self._follow(f"{HUB_BASE}/")
+        if "selectedPupilName" not in root:
+            raise RevokedAuth("inloggningen avvisades — token är ogiltig")
+        self.pupils = extract_pupils(root)
+        _LOGGER.debug("Inloggad via refresh-token, %d barn hittade", len(self.pupils))
+        return self.pupils
+
+    async def _set_cookie_jar(self, jar: CookieJar) -> None:
+        """Kopiera bridge-jarens cookies till HAs session så hubb-anropen bär dem.
+
+        Bygger en aiohttp.SimpleCookie per cookie med rätt domän, stig och secure-flagga
+        så aiohttp matchar cookies mot hubb-anropen lika noggrant som bridge-jaren — inte
+        bara på namn=värde (vilket skulle lämna domän och stig ohanterade).
+        """
+        import http.cookies
+
+        morsels: http.cookies.SimpleCookie = http.cookies.SimpleCookie()
+        for cookie in jar.all():
+            morsel = http.cookies.Morsel()
+            morsel.set(cookie["name"], cookie["value"], "")
+            domain = cookie.get("domain", "") or ""
+            if domain:
+                # aiohttp matchar på host; ta bort ledande punkt så domänen är läsbar.
+                morsel["Domain"] = domain[1:] if domain.startswith(".") else domain
+            if cookie.get("path"):
+                morsel["Path"] = cookie["path"]
+            if cookie.get("secure"):
+                morsel["Secure"] = True
+            if cookie.get("expires"):
+                import contextlib
+                import email.utils
+
+                with contextlib.suppress(TypeError, ValueError):
+                    morsel["Expires"] = email.utils.formatdate(
+                        cookie["expires"], usegmt=True
+                    )
+            morsels[cookie["name"]] = morsel
+        self._session.cookie_jar.update_cookies(morsels)
+
 
     # ------------------------------------------------------------- transport
     async def _once(
