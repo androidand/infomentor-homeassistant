@@ -12,6 +12,7 @@ import json
 import logging
 import secrets
 from datetime import date, timedelta
+from http.cookies import Morsel
 from time import time
 from typing import Any
 
@@ -19,7 +20,7 @@ import aiohttp
 from yarl import URL
 
 from .bankid import BankIDDriver
-from .const import HUB_BASE, MATEO_API, MENTOR_LOGIN
+from .const import HUB_BASE, IDP_STOCKHOLM_PAR, MATEO_API, MENTOR_LOGIN
 from .token_client import (
     Blocked,
     NetworkError,
@@ -87,15 +88,12 @@ UNAUTHORIZED_HANDLER = "/Home/Home/HandleUnauthorizedRequest"
 
 
 def new_raw_cookie_session() -> aiohttp.ClientSession:
-    """En session utan egen cookie-jar, för flöden som hanterar cookies själva.
+    """En session utan egen cookie-jar, för flöden som skickar `Cookie` själva.
 
-    BankID-kedjan och token-bridgen skickar `Cookie`-huvudet explicit från en egen
-    `CookieJar`. En vanlig aiohttp-jar slår då ihop huvudet med sin egen och skriver om
-    det via `SimpleCookie`, som citerar varje värde med `/`, `+` eller `=`:
-    `Sess=ab/cd==` blir `Sess="ab/cd=="`. SiteMinders och PhenixIDs sessionscookies har
-    just de tecknen, servern känner inte igen sessionen och svarar med sidan igen i
-    stället för att omdirigera. Sett live: ordern blev OK men ingen SAML-form kom.
-    `DummyCookieJar` rör inte huvudet.
+    En vanlig aiohttp-jar skriver om ett explicit `Cookie`-huvud via `SimpleCookie`, som
+    citerar värden med `/`, `+` eller `=`: `Sess=ab/cd==` blir `Sess="ab/cd=="`. SiteMinders
+    och PhenixIDs sessionscookies har de tecknen, så servern känner inte igen sessionen
+    (sett live: ordern blev OK men ingen SAML-form kom). `DummyCookieJar` rör inte huvudet.
     """
     return aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar())
 
@@ -112,162 +110,70 @@ class InfomentorApi:
         self._session = session
         self._username = username
         self._password = password
-        self._api_session: aiohttp.ClientSession | None = None
         self.pupils: list[dict[str, Any]] = []
 
-    def _do_request(self):
-        """Binder aiohttp-session till token_clients do_request-kontrakt."""
-        return make_aiohttp_request(self._session)
-
-    async def _close_auxiliary_session(self) -> None:
-        """Stäng en tillfällig session som skapats av bridge, om det finns."""
-        if self._api_session is not None:
-            await self._api_session.close()
-            self._api_session = None
+    async def _enter_hub(self, jar: CookieJar, failure: type[InfomentorError], why: str) -> None:
+        """Använd webbsessionen `jar` för hubb-anropen och läs barnen ur hubbens förstasida."""
+        self._session.cookie_jar.clear()
+        for cookie in jar.all():
+            morsel = Morsel()
+            morsel.set(cookie["name"], cookie["value"], cookie["value"])
+            morsel["domain"] = cookie["domain"].lstrip(".")
+            morsel["path"] = cookie["path"]
+            self._session.cookie_jar.update_cookies({cookie["name"]: morsel})
+        _, root = await self._follow(f"{HUB_BASE}/")
+        if "selectedPupilName" not in root:
+            raise failure(why)
+        self.pupils = extract_pupils(root)
 
     async def async_login_with_bankid(
-        self, *, idp: str = "stockholm_par", progress: Any | None = None
+        self, *, idp: str = IDP_STOCKHOLM_PAR, progress: Any | None = None
     ) -> tuple[list[dict[str, Any]], str]:
-        """Inloggning med interaktiv BankID (Phase B: Stockholm Stad).
+        """Logga in med BankID (Stockholm Stad) och returnera (barn, appens refresh-token).
 
-        Kör driver:n (bankid.py) som styr SiteMinder + PhenixID till en
-        SAMLResponse/SMSESSION, byter sedan den mot en hub-cookie-jar med IMHome
-        via `bridge_web_session` (login.ashx -> LoginCallback -> IMHome). Används
-        i config-flödet som ett progress-steg. Webbsessionen räcker bara ~40 min, så
-        därefter parar vi den till appens roterande refresh-token, den hållbara
-        uppgiften, som returneras tillsammans med barnen: (barn, refresh_token).
-
-        Kastar InvalidAuth (bridgen eller parningen avvisades), CannotConnect (nere)
-        eller en översatt BankIDError (avböjt/tid ut/ändrad sida).
+        Webbsessionen räcker bara ~40 min, så den paras direkt till appens roterande
+        refresh-token, den hållbara uppgiften. Kastar InvalidAuth, CannotConnect eller
+        en BankIDError.
         """
-        # Alla steg som skickar `Cookie` explicit går över en session utan egen jar
-        # (se new_raw_cookie_session); bara hubbens egen session nedan behöver en riktig.
         driver = BankIDDriver()
-        self._api_session = new_raw_cookie_session()
-        raw_request = make_aiohttp_request(self._api_session)
-
-        # 1. Kör driver:n till SAMLResponse.
-        try:
-            result = await driver.run(raw_request, idp=idp, progress=progress)
-
-            # 2. Konvergera: driver:n POST:ar SAMLResponse -> login.ashx -> LoginCallback -> IMHome.
+        async with new_raw_cookie_session() as raw:
+            request = make_aiohttp_request(raw)
+            result = await driver.run(request, idp=idp, progress=progress)
             try:
                 jar = await driver.post_saml_response(
-                    raw_request, saml_response=result.saml_response, jar=result.jar
+                    request, saml_response=result.saml_response, jar=result.jar
                 )
+                await self._enter_hub(jar, TokenError, "hubben avvisade BankID-sessionen")
+                token = await pair_app_token(request, jar, device_identifier=secrets.token_hex(8))
             except TokenError as err:
                 raise InvalidAuth(str(err)) from err
-
-            # 3. Kör hubb-anropen med jar:t och pocka ut barnen.
-            self._session.cookie_jar.clear()
-            await self._set_cookie_jar(jar)
-            _, root = await self._follow(f"{HUB_BASE}/")
-            if "selectedPupilName" not in root:
-                raise InvalidAuth("inloggningen avvisades — BankID-svaret accepterades inte")
-            self.pupils = extract_pupils(root)
-            _LOGGER.debug("Inloggad via BankID, %d barn hittade", len(self.pupils))
-
-            # 4. Para webbsessionen till appens refresh-token (single holder, roterar).
-            try:
-                token = await pair_app_token(
-                    raw_request, jar, device_identifier=secrets.token_hex(8)
-                )
-            except TokenError as err:
-                raise InvalidAuth(f"parningen avvisades: {err}") from err
-        finally:
-            await self._close_auxiliary_session()
         return self.pupils, token["refresh_token"]
 
     async def async_login_with_token(
         self, refresh_token: str, *, on_rotated=None
     ) -> list[dict[str, Any]]:
-        """Inloggning med den hållbara appens refresh-token (BankID-givna).
+        """Logga in med appens refresh-token: friska, bridga till en hubbsession, läs barnen.
 
-        Friskar token, byter den via hub-bridgen till en ny IMHome-cookie-jar och
-        kör sedan de befintliga hubb-anropen som plockar ut barnen. Den tillfälliga
-        sessionen som bridge använder stängs efteråt; hubb-sessionen bär imHome-cookien.
-
-        `on_rotated` anropas, om given, med den roterade refresh-token så att en ägare
-        kan skriva tillbaka den (kordinatorns lock garanterar en ägare).
-
-        Kastar RevokedAuth (token död -> reauth), ApiError (bridgen misslyckades) eller
-        CannotConnect (nere). BLOCKED/F5 och nätverksfel höjs som UpdateFailed av
-        koordinatorn, aldrig som reauth.
+        `on_rotated(ny_token)` anropas innan något mer kan misslyckas (persist-before-use).
+        Kastar RevokedAuth (token död: reauth), CannotConnect (nere eller blockerad: försök
+        igen, aldrig reauth) eller ApiError (bridgen misslyckades).
         """
-        do_request = self._do_request()
-
-        # 1. Friska token — detta rotar om refresh-token. Kastar TokenRevoked (reauth),
-        #    Blocked (F5/Framända, försök igen) eller NetworkError (nere).
         try:
-            token = await app_refresh_token(do_request, refresh_token)
+            token = await app_refresh_token(make_aiohttp_request(self._session), refresh_token)
         except TokenRevoked as err:
             raise RevokedAuth(str(err)) from err
         except (Blocked, NetworkError) as err:
             raise CannotConnect(str(err)) from err
+        if token["refresh_token"] != refresh_token and on_rotated is not None:
+            on_rotated(token["refresh_token"])
 
-        # Roteringen är känd före bridge; rapportera den så ägaren kan spara den
-        # innan något mer kan misslyckas (persist-before-use).
-        rotated = token.get("refresh_token")
-        if rotated and rotated != refresh_token and on_rotated is not None:
-            on_rotated(rotated)
-
-        # 2. Byt access-token mot en hub-cookie-jar med IMHome. Använd en egen session
-        #    så cookie-jaren är isolerad (bridge sätter cookies per domän); den stängs
-        #    efteråt. Kastar TokenError om kedjan misslyckas (t.ex. förlorad trailing slash).
-        self._api_session = new_raw_cookie_session()
-        api_request = make_aiohttp_request(self._api_session)
-        try:
-            jar = await bridge_web_session(api_request, token["access_token"])
-        except TokenError as err:
-            raise ApiError(str(err)) from err
-        finally:
-            # Bridge-sessionen behövs inte längre när jar:t är byggt; lämnas den öppen
-            # läcker en session per inloggning.
-            await self._close_auxiliary_session()
-
-        # 3. Använd jar:t mot hubben: ren cookie-jar, hämta hubben (sätter IMHome-synliggörelse)
-        #    och plocka ut barnen.
-        self._session.cookie_jar.clear()
-        await self._set_cookie_jar(jar)
-        _, root = await self._follow(f"{HUB_BASE}/")
-        if "selectedPupilName" not in root:
-            raise RevokedAuth("inloggningen avvisades — token är ogiltig")
-        self.pupils = extract_pupils(root)
-        _LOGGER.debug("Inloggad via refresh-token, %d barn hittade", len(self.pupils))
+        async with new_raw_cookie_session() as raw:
+            try:
+                jar = await bridge_web_session(make_aiohttp_request(raw), token["access_token"])
+            except TokenError as err:
+                raise ApiError(str(err)) from err
+        await self._enter_hub(jar, RevokedAuth, "hubben avvisade webbsessionen från token")
         return self.pupils
-
-    async def _set_cookie_jar(self, jar: CookieJar) -> None:
-        """Kopiera bridge-jarens cookies till HAs session så hubb-anropen bär dem.
-
-        Bygger en aiohttp.SimpleCookie per cookie med rätt domän, stig och secure-flagga
-        så aiohttp matchar cookies mot hubb-anropen lika noggrant som bridge-jaren — inte
-        bara på namn=värde (vilket skulle lämna domän och stig ohanterade).
-        """
-        import http.cookies
-
-        morsels: http.cookies.SimpleCookie = http.cookies.SimpleCookie()
-        for cookie in jar.all():
-            morsel = http.cookies.Morsel()
-            morsel.set(cookie["name"], cookie["value"], "")
-            domain = cookie.get("domain", "") or ""
-            if domain:
-                # aiohttp matchar på host; ta bort ledande punkt så domänen är läsbar.
-                morsel["Domain"] = domain[1:] if domain.startswith(".") else domain
-            if cookie.get("path"):
-                morsel["Path"] = cookie["path"]
-            if cookie.get("secure"):
-                morsel["Secure"] = True
-            if cookie.get("expires"):
-                import contextlib
-                import email.utils
-
-                with contextlib.suppress(TypeError, ValueError):
-                    morsel["Expires"] = email.utils.formatdate(
-                        cookie["expires"], usegmt=True
-                    )
-            morsels[cookie["name"]] = morsel
-        self._session.cookie_jar.update_cookies(morsels)
-
 
     # ------------------------------------------------------------- transport
     async def _once(

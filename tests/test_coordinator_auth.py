@@ -1,180 +1,109 @@
-"""Tester för koordinatorns token-rotation (körs i CI)."""
+"""The coordinator's login: which failures mean reauth, and one holder for the rotating token."""
 
 from __future__ import annotations
 
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 pytest.importorskip("homeassistant")
 
-from homeassistant.config_entries import ConfigEntry  # noqa: E402
-from homeassistant.core import HomeAssistant  # noqa: E402
 from homeassistant.exceptions import ConfigEntryAuthFailed  # noqa: E402
 from homeassistant.helpers.update_coordinator import UpdateFailed  # noqa: E402
 
-from custom_components.infomentor.api import CannotConnect, RevokedAuth  # noqa: E402
-from custom_components.infomentor.const import DOMAIN  # noqa: E402
+from custom_components.infomentor.api import CannotConnect, InvalidAuth, RevokedAuth  # noqa: E402
+from custom_components.infomentor.coordinator import InfomentorCoordinator  # noqa: E402
 
 
-def _make_coordinator(hass: HomeAssistant, entry: ConfigEntry):
-    """Bygg en koordinator med mockad api (utan aiohttp-session)."""
-    from custom_components.infomentor.coordinator import InfomentorCoordinator
-
+def make_coordinator(hass, data):
+    """A coordinator with a mocked api and a plain entry, without Home Assistant's setup."""
     coord = InfomentorCoordinator.__new__(InfomentorCoordinator)
-    coord.entry = entry
-    coord._lock = None  # sätts nedan
-    coord.api = MagicMock()
-    coord._ok_calls = 0
-    coord._auth_skips = 0
-    coord._refresh_inflight = None
-    coord._plan_details = {}
-    coord._plan_ids_seen = set()
-    coord._not_permitted = set()
     coord.hass = hass
+    coord.entry = SimpleNamespace(data=data)
+    coord.api = MagicMock()
+    coord._lock = asyncio.Lock()
     return coord
 
 
-@pytest.fixture
-def entry(hass: HomeAssistant) -> ConfigEntry:
-    """En config-post med en refresh-token."""
-    return ConfigEntry(
-        created_at=None,
-        data={"refresh_token": "old-refresh-token", "auth_mode": "token"},
-        disabled_by=None,
-        discovery_keys={},
-        domain=DOMAIN,
-        entry_id="test-entry",
-        minor_version=2,
-        modified_at=None,
-        options={},
-        source="user",
-        state="not_loaded",
-        subentries_data=[],
-        title="InfoMentor",
-        unique_id="test",
-        version=2,
-    )
+TOKEN_ENTRY = {"auth_mode": "token", "refresh_token": "old"}
 
 
-async def test_revoked_token_triggers_reauth(hass, entry: ConfigEntry) -> None:
-    """En REVOKED-token höjs som ConfigEntryAuthFailed, aldrig UpdateFailed."""
-    coord = _make_coordinator(hass, entry)
-    coord._lock = __import__("asyncio").Lock()
-    coord.api.async_login_with_token = AsyncMock(side_effect=RevokedAuth("ogiltig"))
-
-    with pytest.raises(ConfigEntryAuthFailed):
+@pytest.mark.parametrize(
+    ("data", "failure", "expected"),
+    [
+        (TOKEN_ENTRY, RevokedAuth("dead"), ConfigEntryAuthFailed),
+        (TOKEN_ENTRY, CannotConnect("down or blocked"), UpdateFailed),  # never reauth
+        ({"auth_mode": "password"}, InvalidAuth("wrong password"), ConfigEntryAuthFailed),
+        ({"auth_mode": "password"}, CannotConnect("down"), UpdateFailed),
+    ],
+    ids=["token-revoked", "token-blocked", "password-wrong", "password-down"],
+)
+async def test_a_failed_login_is_reauth_only_when_the_credential_is_dead(
+    hass, data, failure, expected
+) -> None:
+    coord = make_coordinator(hass, data)
+    coord.api.async_login_with_token = AsyncMock(side_effect=failure)
+    coord.api.async_login = AsyncMock(side_effect=failure)
+    with pytest.raises(expected):
         await coord._login()
 
 
-async def test_blocked_not_revoked(hass, entry: ConfigEntry) -> None:
-    """Ett BLOCKED-svar höjs som UpdateFailed (försök igen), aldrig reauth."""
-    coord = _make_coordinator(hass, entry)
-    coord._lock = __import__("asyncio").Lock()
-    coord.api.async_login_with_token = AsyncMock(side_effect=CannotConnect("nere"))
-
-    with pytest.raises(UpdateFailed):
-        await coord._login()
-
-
-async def test_rotated_token_written_before_bridge(hass, entry: ConfigEntry) -> None:
-    """Efter en lyckad refresh skriver koordinatorn tillbaka den roterade token."""
-    coord = _make_coordinator(hass, entry)
-    coord._lock = __import__("asyncio").Lock()
-
-    captured: dict[str, Any] = {}
-
-    async def fake_login(refresh_token: str, on_rotated=None) -> list[dict[str, Any]]:  # type: ignore[valid-type]  # noqa: PGH003
-        if on_rotated:
-            on_rotated("rotated-token-xyz")
-        return [{"pupil_id": "1"}]
-
-    coord.api.async_login_with_token = AsyncMock(side_effect=fake_login)
-
-    def fake_update(e, data):
-        captured["data"] = data
-        return True
-
-    with patch.object(hass.config_entries, "async_update_entry", side_effect=fake_update):
-        await coord._login()
-
-    assert captured["data"]["refresh_token"] == "rotated-token-xyz"
-
-
-async def test_no_refresh_token_reauth(hass, entry: ConfigEntry) -> None:
-    """Utan refresh-token i posten startas reauth."""
-    coord = _make_coordinator(hass, entry)
-    coord._lock = __import__("asyncio").Lock()
-    coord.api.async_login_with_token = AsyncMock(return_value=[])
-
-    entry.__dict__["data"] = {"auth_mode": "token"}
-
-    with pytest.raises(ConfigEntryAuthFailed):
-        await coord._login()
-
-
-async def test_password_mode_dispatches_async_login(hass) -> None:
-    """auth_mode=password använder async_login, aldrig token-flödet."""
-    from custom_components.infomentor.coordinator import InfomentorCoordinator
-
-    entry = ConfigEntry(
-        created_at=None,
-        data={"username": "user@example.com", "password": "x", "auth_mode": "password"},
-        disabled_by=None,
-        discovery_keys={},
-        domain=DOMAIN,
-        entry_id="pw-entry",
-        minor_version=2,
-        options={},
-        source="user",
-        state="not_loaded",
-        subentries_data=[],
-        title="InfoMentor",
-        unique_id="user@example.com",
-        version=2,
-    )
-    coord = InfomentorCoordinator.__new__(InfomentorCoordinator)
-    coord.entry = entry
-    coord._lock = None
-    coord.api = MagicMock()
-    coord._ok_calls = 0
-    coord._auth_skips = 0
-    coord._refresh_inflight = None
-    coord._plan_details = {}
-    coord._plan_ids_seen = set()
-    coord.hass = hass
+async def test_password_mode_never_touches_the_token_flow(hass) -> None:
+    coord = make_coordinator(hass, {"auth_mode": "password"})
     coord.api.async_login = AsyncMock(return_value=[{"id": "1"}])
-
     await coord._login()
     coord.api.async_login.assert_awaited_once()
-    # Token-vägen får inte anropas i password-läge.
     coord.api.async_login_with_token.assert_not_called()
 
 
-async def test_two_updates_race_make_one_request(hass, entry: ConfigEntry) -> None:
-    """Två parallella uppdateringar gör exakt ett token-anrop och båda får samma token."""
-    import asyncio
+async def test_an_entry_without_a_refresh_token_asks_for_reauth(hass) -> None:
+    coord = make_coordinator(hass, {"auth_mode": "token"})
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coord._login()
 
-    coord = _make_coordinator(hass, entry)
-    coord._lock = asyncio.Lock()
 
-    call_count = {"n": 0}
-    received: set[str] = set()
+def _rotating_api(coord):
+    """An api whose token is single-use: it rejects a token it has already rotated."""
+    used: list[str] = []
+    alive = {"old"}
 
-    async def fake_login(refresh_token: str, on_rotated=None) -> list[dict[str, Any]]:  # type: ignore[valid-type]  # noqa: PGH003
-        call_count["n"] += 1
-        if on_rotated:
-            on_rotated("rotated-token-xyz")
-        await asyncio.sleep(0.01)
-        received.add("rotated-token-xyz")
-        return [{"pupil_id": "1"}]
+    async def login(refresh_token, on_rotated=None):
+        await asyncio.sleep(0.01)  # a slow network: the other login gets its chance to read the token
+        used.append(refresh_token)
+        if refresh_token not in alive:
+            raise RevokedAuth("consumed")
+        alive.discard(refresh_token)
+        new = f"rotated-{len(used)}"
+        alive.add(new)
+        on_rotated(new)
+        return [{"id": "1"}]
 
-    coord.api.async_login_with_token = AsyncMock(side_effect=fake_login)
+    coord.api.async_login_with_token = login
+    coord.hass.config_entries.async_update_entry = lambda entry, data: setattr(entry, "data", data)
+    return used
 
-    with patch.object(hass.config_entries, "async_update_entry", return_value=True):
-        results = await asyncio.gather(coord._login(), coord._login())
 
-    assert all(pupils for pupils in results)
-    assert call_count["n"] == 1
-    assert received == {"rotated-token-xyz"}
+async def test_the_rotated_token_is_stored_before_the_login_continues(hass) -> None:
+    coord = make_coordinator(hass, dict(TOKEN_ENTRY))
+    stored_during_login = []
+
+    async def login(refresh_token, on_rotated=None):
+        on_rotated("rotated")
+        stored_during_login.append(coord.entry.data["refresh_token"])
+        raise CannotConnect("fails after the rotation")
+
+    coord.api.async_login_with_token = login
+    coord.hass.config_entries.async_update_entry = lambda entry, data: setattr(entry, "data", data)
+    with pytest.raises(UpdateFailed):
+        await coord._login()
+    assert stored_during_login == ["rotated"]
+    assert coord.entry.data["refresh_token"] == "rotated"  # the next try uses the live one
+
+
+async def test_two_overlapping_logins_never_use_the_same_token_twice(hass) -> None:
+    coord = make_coordinator(hass, dict(TOKEN_ENTRY))
+    used = _rotating_api(coord)
+    await asyncio.gather(coord._login(), coord._login())
+    assert used == ["old", "rotated-1"]
