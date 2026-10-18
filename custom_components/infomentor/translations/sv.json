@@ -39,7 +39,8 @@
       "reauth_successful": "Inloggad igen."
     },
     "progress": {
-      "bankid": "{message}\n\nÖppna BankID-appen på din telefon: {autostart_url}"
+      "bankid": "**Skanna koden med BankID-appen**\n\n<ha-qr-code data=\"{qr_data}\" scale=\"6\" margin=\"2\" error-correction-level=\"low\"></ha-qr-code>\n\nÖppnar du den här sidan på telefonen som har BankID? [Öppna BankID-appen]({autostart_link})",
+      "bankid_starting": "{message}"
     }
   },
   "options": {

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -15,6 +14,7 @@ from homeassistant.config_entries import (
     ConfigFlowResult,
     OptionsFlow,
 )
+from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .api import (
@@ -23,12 +23,7 @@ from .api import (
     InvalidAuth,
     RevokedAuth,
 )
-from .bankid import (
-    BankIDDenied,
-    BankIDError,
-    BankIDStep,
-    BankIDTimeout,
-)
+from .bankid_session import BankIdLogin
 from .const import (
     CONF_ENABLE_LUNCH,
     CONF_MATEO_UNIT,
@@ -130,8 +125,8 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         """Initiera flödet med BankID-bakgrundsuppgift."""
         super().__init__()
-        self._bankid_task: asyncio.Task | None = None
-        self._bankid_state: dict[str, Any] = {}
+        self._bankid: BankIdLogin | None = None
+        self._bankid_error = "unknown"
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Meny: välj app-token (rekommenderat) eller användarnamn/lösenord."""
@@ -153,53 +148,25 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Interaktiv BankID-inloggning (Stockholm Stad) som ett progress-steg.
 
-        Driver:n körs som en bakgrundsuppgift och HA visar progress tills den är klar.
-        Först då går flödet vidare till `bankid_done`. Endast Stockholm Stad stöds
-        idag; andra skolor får token-klistring.
+        Driver:n körs i bakgrunden (`BankIdLogin`). Varje ny QR-bild gör den lilla
+        väntan klar, HA kör steget igen, och steget svarar med en ny väntan och den nya
+        QR-koden; det är så en roterande QR kan visas i en dialog. Endast Stockholm
+        Stad stöds idag; andra skolor får token-klistring.
         """
-        if self._bankid_task is None:
-            state: dict[str, Any] = {
-                "message": "Startar BankID…",
-                "autostart_url": "",
-                "error": None,
-            }
-            self._bankid_state = state
-
-            async def _progress(step: BankIDStep) -> None:
-                state["message"] = step.message
-                state["autostart_url"] = step.autostart_url or state["autostart_url"]
-
-            async def _run() -> tuple[list[dict[str, Any]], str] | None:
-                try:
-                    return await _validate_bankid(self.hass, IDP_STOCKHOLM_PAR, _progress)
-                except BankIDDenied:
-                    state["error"] = "bankid_denied"
-                except BankIDTimeout:
-                    state["error"] = "bankid_timeout"
-                except BankIDError:
-                    state["error"] = "bankid_page_changed"
-                except InvalidAuth:
-                    state["error"] = "invalid_auth"
-                except CannotConnect:
-                    state["error"] = "cannot_connect"
-                except Exception:  # noqa: BLE001
-                    _LOGGER.exception("Oväntat fel vid BankID-inloggning")
-                    state["error"] = "unknown"
-                return None
-
-            self._bankid_task = self.hass.async_create_task(_run())
-
-        if not self._bankid_task.done():
-            return self.async_show_progress(
-                step_id="bankid",
-                progress_action="bankid",
-                progress_task=self._bankid_task,
-                description_placeholders={
-                    "message": self._bankid_state["message"],
-                    "autostart_url": self._bankid_state["autostart_url"],
-                },
+        if self._bankid is None:
+            self._bankid = BankIdLogin(
+                self.hass,
+                lambda progress: _validate_bankid(self.hass, IDP_STOCKHOLM_PAR, progress),
             )
-        return self.async_show_progress_done(next_step_id="bankid_done")
+        login = self._bankid
+        if login.done:
+            return self.async_show_progress_done(next_step_id="bankid_done")
+        return self.async_show_progress(
+            step_id="bankid",
+            progress_action=login.progress_action,
+            progress_task=login.wait_for_change(),
+            description_placeholders=login.placeholders(),
+        )
 
     async def async_step_bankid_done(
         self, user_input: dict[str, Any] | None = None
@@ -209,13 +176,11 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         BankID är bara sättet att få appens refresh-token (webbsessionen räcker ~40 min),
         så posten sparas som `token`, det flöde koordinatorn och reauth redan kan.
         """
-        task, self._bankid_task = self._bankid_task, None
-        error = self._bankid_state.get("error")
-        outcome = task.result() if task is not None and not task.cancelled() else None
-        if error or outcome is None:
-            self._bankid_state["error"] = error or "unknown"
+        login, self._bankid = self._bankid, None
+        if login is None or login.error or login.outcome is None:
+            self._bankid_error = (login.error if login else None) or "unknown"
             return await self.async_step_bankid_retry()
-        pupils, refresh_token = outcome
+        pupils, refresh_token = login.outcome
         if self.source == SOURCE_REAUTH:
             return self.async_update_reload_and_abort(
                 self._get_reauth_entry(),
@@ -241,8 +206,15 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="bankid_retry",
             data_schema=vol.Schema({}),
-            errors={"base": self._bankid_state.get("error") or "unknown"},
+            errors={"base": self._bankid_error},
         )
+
+    @callback
+    def async_remove(self) -> None:
+        """Avbryt BankID-inloggningen om dialogen stängs. HA avbryter bara den korta
+        väntan, inte driver:n, så den måste stoppas här."""
+        if self._bankid is not None:
+            self._bankid.cancel()
 
     async def async_step_password(
         self, user_input: dict[str, Any] | None = None
@@ -349,8 +321,6 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth"
             except CannotConnect:
                 errors["base"] = "cannot_connect"
-            except BankIDError as err:
-                errors["base"] = str(err)
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Oväntat fel vid om-auth")
                 errors["base"] = "unknown"
@@ -372,7 +342,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors=errors,
             )
         if auth_mode == "bankid":
-            self._bankid_task = None
+            self._bankid = None
             return await self.async_step_bankid()
         return self.async_show_form(
             step_id="reauth_confirm",

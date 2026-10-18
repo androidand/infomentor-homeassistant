@@ -39,7 +39,8 @@
       "reauth_successful": "Signed in again."
     },
     "progress": {
-      "bankid": "{message}\n\nOpen the BankID app on your phone: {autostart_url}"
+      "bankid": "**Scan this code with the BankID app**\n\n<ha-qr-code data=\"{qr_data}\" scale=\"6\" margin=\"2\" error-correction-level=\"low\"></ha-qr-code>\n\nOpening this page on the phone that has BankID? [Open the BankID app]({autostart_link})",
+      "bankid_starting": "{message}"
     }
   },
   "options": {

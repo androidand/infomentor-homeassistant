@@ -47,7 +47,7 @@ USER_AGENT = (
 # inte försöka automatiskt i oändligt (det skulle spä på IdP:s sida), så vi
 # stoppar efter en tid och ber användaren om hjälp.
 MAX_POLL_SECONDS = 180.0
-POLL_INTERVAL_SECONDS = 2.0
+POLL_INTERVAL_SECONDS = 1.0  # QR-koden byter varje sekund; en äldre bild hinner inte skannas
 MAX_HOPS = 20
 MAX_RESTARTS = 3  # en ickeskannad QR-order dör efter ca 30 s
 WAITING_STATES = frozenset({"PENDING", "STARTED", "USER_SIGN"})
@@ -81,6 +81,7 @@ class BankIDStep:
     message: str
     qr_data: str | None = None
     autostart_url: str | None = None
+    autostart_token: str | None = None
     state: str = "PENDING"
     action: str = "bankid"  # progress_action
     task: str = "bankid"  # progress_task (HA >= 2024.8 kräver detta)
@@ -91,7 +92,6 @@ class BankIDResult:
     """Resultatet av BankID-inloggningen."""
 
     saml_response: str | None = None  # när vi körde interaktivt
-    smsession: str | None = None  # när vi körde tyst (giltig SSO)
     jar: CookieJar | None = None  # cookies från IdP-hoppen
 
 
@@ -254,6 +254,7 @@ class BankIDDriver:
                             "Skanna QR-koden i BankID-appen",
                             qr_data=qr_data,
                             autostart_url=autostart,
+                            autostart_token=token,
                             state=state,
                         )
                     )

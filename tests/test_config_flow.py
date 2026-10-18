@@ -201,27 +201,50 @@ async def _start_bankid(hass: HomeAssistant):
     return await hass.config_entries.flow.async_configure(result["flow_id"], {"method": "bankid"})
 
 
-async def test_bankid_flow_shows_progress_then_creates_entry(
+async def _settle() -> None:
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+
+async def test_bankid_progress_shows_a_refreshing_qr_and_the_same_device_link(
     hass: HomeAssistant, bankid_validate
 ) -> None:
-    """Menyval -> progress medan BankID väntar -> färdig -> post."""
+    """Varje ny QR-bild ritar om steget (ny väntan + nya placeholders); sist skapas posten."""
     from custom_components.infomentor.bankid import BankIDStep
 
-    release = asyncio.Event()
+    frames: asyncio.Queue = asyncio.Queue()
 
     async def fake_validate(hass, idp, progress):
-        await progress(BankIDStep("Skanna QR", qr_data="q", autostart_url="bankid:///?x=1"))
-        await release.wait()
+        while (qr := await frames.get()) is not None:
+            await progress(BankIDStep("Skanna", qr_data=qr, autostart_token="tok1"))
         return [{"id": "1"}], "rt-new"
 
     bankid_validate["fn"] = fake_validate
     result = await _start_bankid(hass)
+    flow_id = result["flow_id"]
     assert result["type"] == data_entry_flow.FlowResultType.SHOW_PROGRESS
-    assert result["step_id"] == "bankid"
-    assert result["description_placeholders"]["autostart_url"] == "bankid:///?x=1"
+    assert result["progress_action"] == "bankid_starting"
 
-    release.set()
-    await _finish_bankid(hass, result["flow_id"])
+    # Frontend ritar om steget först när HA skickar denna händelse.
+    refetch_events = []
+    hass.bus.async_listen("data_entry_flow_progressed", refetch_events.append)
+
+    seen = []
+    for qr in ("bankid.a.0.h1", "bankid.a.1.h2", "bankid.a.2.h3"):
+        await frames.put(qr)
+        await _settle()
+        # Samma anrop som frontend gör när den får händelsen.
+        step = await hass.config_entries.flow.async_configure(flow_id)
+        assert step["type"] == data_entry_flow.FlowResultType.SHOW_PROGRESS
+        assert step["progress_action"] == "bankid"
+        seen.append(step["description_placeholders"])
+
+    assert [p["qr_data"] for p in seen] == ["bankid.a.0.h1", "bankid.a.1.h2", "bankid.a.2.h3"]
+    assert len(refetch_events) >= 3
+    assert seen[0]["autostart_link"] == "https://app.bankid.com/?autostarttoken=tok1&redirect=null"
+
+    await frames.put(None)
+    await _finish_bankid(hass, flow_id)
     (entry,) = hass.config_entries.async_entries(DOMAIN)
     # BankID är vägen till appens refresh-token; det är den som sparas.
     assert entry.data == {"refresh_token": "rt-new", "auth_mode": "token"}
@@ -261,11 +284,10 @@ async def test_bankid_failure_shows_error_and_retry_starts_a_new_order(
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1
 
 
-async def test_bankid_task_is_cancelled_when_the_dialog_is_closed(
+async def test_bankid_login_is_cancelled_when_the_dialog_is_closed(
     hass: HomeAssistant, bankid_validate
 ) -> None:
-    # HA avbryter progress_task själv när flödet avbryts; testet låser det beteendet,
-    # så att ingen egen städning behövs och ingen läcker en väntande BankID-order.
+    """HA avbryter bara den korta väntan; driver:n måste stoppas av flödet själv."""
     started = asyncio.Event()
     cancelled = asyncio.Event()
 
@@ -281,5 +303,50 @@ async def test_bankid_task_is_cancelled_when_the_dialog_is_closed(
     result = await _start_bankid(hass)
     await started.wait()
     hass.config_entries.flow.async_abort(result["flow_id"])
-    await hass.async_block_till_done()
+    await _settle()
     assert cancelled.is_set()
+
+
+def test_unsafe_qr_data_and_tokens_never_reach_the_description() -> None:
+    """qrData och token hamnar i ett HTML-attribut och en URL i markdown."""
+    from unittest.mock import MagicMock
+
+    from custom_components.infomentor.bankid import BankIDStep
+    from custom_components.infomentor.bankid_session import BankIdLogin
+
+    hass = MagicMock()
+    hass.async_create_task = lambda coro: (coro.close(), MagicMock())[1]
+    login = BankIdLogin(hass, lambda progress: None)
+    asyncio.run(login._progress(BankIDStep("x", qr_data='a"><script>', autostart_token="t&x=1")))
+    assert login.placeholders() == {
+        "message": "x",
+        "qr_data": "",
+        "autostart_link": "",
+    }
+    assert login.progress_action == "bankid_starting"
+
+
+async def test_one_pending_wait_is_shared_until_something_changes() -> None:
+    """Varje omhämtning av steget anropar wait_for_change. Skulle den skapa en ny väntan
+    varje gång läcker de gamla, och varje färdig väntan kör flödet en gång till."""
+    from unittest.mock import MagicMock
+
+    from custom_components.infomentor.bankid import BankIDStep
+    from custom_components.infomentor.bankid_session import BankIdLogin
+
+    hass = MagicMock()
+    hass.async_create_task = asyncio.ensure_future
+    release = asyncio.Event()
+
+    async def run(progress):
+        await release.wait()
+
+    login = BankIdLogin(hass, run)
+    first = login.wait_for_change()
+    assert login.wait_for_change() is first
+
+    await login._progress(BankIDStep("x", qr_data="q1", autostart_token="t"))
+    await first
+    second = login.wait_for_change()
+    assert second is not first
+    login.cancel()
