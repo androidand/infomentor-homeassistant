@@ -48,8 +48,9 @@
       "cannot_connect": "Could not reach InfoMentor.",
       "unknown": "Unexpected error.",
       "bankid_denied": "BankID login was cancelled.",
-      "bankid_timeout": "BankID login timed out. Try again.",
-      "bankid_page_changed": "The BankID flow was interrupted or the page changed. Try again."
+      "bankid_timeout": "Nobody scanned the QR code in time. Try again.",
+      "bankid_page_changed": "The BankID flow was interrupted or the page changed. Try again.",
+      "bankid_failed": "The BankID login failed. Try again."
     },
     "abort": {
       "already_configured": "This account is already configured.",

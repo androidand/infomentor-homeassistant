@@ -20,9 +20,11 @@ from .api import CannotConnect, InvalidAuth
 from .bankid import (
     BankIDDenied,
     BankIDError,
+    BankIDPageChanged,
     BankIDStep,
     BankIDTimeout,
 )
+from .qr import qr_markdown_image
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,8 +70,10 @@ class BankIdLogin:
             self.error = "bankid_denied"
         except BankIDTimeout:
             self.error = "bankid_timeout"
-        except BankIDError:
+        except BankIDPageChanged:
             self.error = "bankid_page_changed"
+        except BankIDError:
+            self.error = "bankid_failed"
         except InvalidAuth:
             self.error = "invalid_auth"
         except CannotConnect:
@@ -111,12 +115,8 @@ class BankIdLogin:
         link = (
             AUTOSTART_LINK.format(token=self.autostart_token) if self.autostart_token else ""
         )
-        # HA:s översättningar tolkar `<tagg>` som ICU-taggar (INVALID_TAG), så elementet
-        # måste komma in som ett placeholder-värde, inte stå i översättningssträngen.
-        qr = (
-            f'<ha-qr-code data="{self.qr_data}" scale="6" margin="2" '
-            'error-correction-level="low"></ha-qr-code>'
-            if self.qr_data
-            else ""
-        )
+        # Bilden kommer in som ett placeholder-värde: HA:s översättningar tolkar `<tagg>`
+        # i en sträng som ICU-taggar (INVALID_TAG). Ritad här, inte med HA:s ha-qr-code,
+        # så att den alltid är svart på vitt (se qr.py).
+        qr = qr_markdown_image(self.qr_data) if self.qr_data else ""
         return {"message": self.message, "qr_code": qr, "autostart_link": link}

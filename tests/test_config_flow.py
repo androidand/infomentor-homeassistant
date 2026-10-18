@@ -247,9 +247,10 @@ async def test_bankid_progress_shows_a_refreshing_qr_and_the_same_device_link(
         assert step["progress_action"] == "bankid"
         seen.append(step["description_placeholders"])
 
+    from custom_components.infomentor.qr import qr_markdown_image
+
     assert [p["qr_code"] for p in seen] == [
-        f'<ha-qr-code data="{qr}" scale="6" margin="2" error-correction-level="low"></ha-qr-code>'
-        for qr in ("bankid.a.0.h1", "bankid.a.1.h2", "bankid.a.2.h3")
+        qr_markdown_image(qr) for qr in ("bankid.a.0.h1", "bankid.a.1.h2", "bankid.a.2.h3")
     ]
     assert len(refetch_events) >= 3
     assert seen[0]["autostart_link"] == "https://app.bankid.com/?autostarttoken=tok1&redirect=null"
@@ -370,3 +371,30 @@ def test_translation_strings_contain_no_html_tags() -> None:
     for name in ("strings.json", "translations/en.json", "translations/sv.json"):
         text = json.dumps(json.loads((root / name).read_text()))
         assert "<" not in text and ">" not in text, name
+
+
+@pytest.mark.parametrize(
+    ("raised", "key"),
+    [
+        ("BankIDDenied", "bankid_denied"),
+        ("BankIDTimeout", "bankid_timeout"),
+        ("BankIDPageChanged", "bankid_page_changed"),
+        ("BankIDError", "bankid_failed"),
+    ],
+)
+async def test_each_bankid_failure_gets_its_own_message(raised: str, key: str) -> None:
+    """Ett sidfel och en oskannad order får inte visa samma text."""
+    from unittest.mock import MagicMock
+
+    from custom_components.infomentor import bankid
+    from custom_components.infomentor.bankid_session import BankIdLogin
+
+    hass = MagicMock()
+    hass.async_create_task = asyncio.ensure_future
+
+    async def run(progress):
+        raise getattr(bankid, raised)("x")
+
+    login = BankIdLogin(hass, run)
+    await login._task
+    assert login.error == key
