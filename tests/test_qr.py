@@ -49,14 +49,10 @@ def _width(markdown: str) -> str:
     return match.group(1)
 
 
-def test_size_stays_constant_while_the_bankid_counter_grows() -> None:
-    """BankID-datat växer med räknaren (`bankid.<uuid>.<n>.<hash>`). Med automatisk version
-    hoppar bilden mellan storlekar mitt under skanningen (sett i den riktiga dialogen)."""
-    uuid = "5a637711-566a-4488-9c72-b8694eda1260"
-    sizes = {
-        _width(qr_markdown_image(f"bankid.{uuid}.{n}.{'ab' * 32}"))
-        for n in (0, 3, 9, 10, 99, 100, 999)
-    }
+def test_size_stays_constant_whatever_the_data_length() -> None:
+    """Med automatisk QR-version hoppar bilden mellan storlekar när datat byter version.
+    Längderna 90 till 150 byte korsar flera versionsgränser (v5 rymmer 106, v6 134)."""
+    sizes = {_width(qr_markdown_image("x" * n)) for n in (90, 100, 107, 120, 135, 150)}
     assert len(sizes) == 1, sizes
 
 
