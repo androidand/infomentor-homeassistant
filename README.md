@@ -56,7 +56,10 @@ folder and restart.
 
 You can sign in two ways:
 
-- **App token (recommended)** — paste the rotating refresh token that your
+- **BankID (Stockholm Stad)** — scan a QR code with the BankID app, or tap the
+  link on the phone that has it. The integration then pairs itself to the
+  InfoMentor app credential and keeps only the rotating refresh token.
+- **App token** — paste the rotating refresh token that your
   InfoMentor app (or the companion CLI) hands back after a one-time BankID
   login. The integration stores the token (not a password) and refreshes it
   every run.
