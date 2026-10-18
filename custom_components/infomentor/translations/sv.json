@@ -48,8 +48,9 @@
       "cannot_connect": "Kunde inte nå InfoMentor.",
       "unknown": "Oväntat fel.",
       "bankid_denied": "BankID-inloggningen avbröts.",
-      "bankid_timeout": "BankID-inloggningen tog för lång tid. Försök igen.",
-      "bankid_page_changed": "BankID-flödet avbröts eller sidan har ändrats. Försök igen."
+      "bankid_timeout": "Ingen skannade QR-koden i tid. Försök igen.",
+      "bankid_page_changed": "BankID-flödet avbröts eller sidan har ändrats. Försök igen.",
+      "bankid_failed": "BankID-inloggningen misslyckades. Försök igen."
     },
     "abort": {
       "already_configured": "Det här kontot är redan konfigurerat.",

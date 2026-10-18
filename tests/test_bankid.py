@@ -241,13 +241,15 @@ class TestBankIDRun(unittest.IsolatedAsyncioTestCase):
 
     async def test_error_after_scan_does_not_restart(self):
         server = FakeServer(["USER_SIGN", "ERROR"])
-        with self.assertRaises(BankIDError):
+        with self.assertRaises(BankIDError) as caught:
             await _driver().run(server)
+        self.assertNotIsInstance(caught.exception, BankIDTimeout)
         self.assertEqual(server.initializes, 1)
 
     async def test_restarts_are_limited(self):
         server = FakeServer(["ERROR"] * 10)
-        with self.assertRaises(BankIDError):
+        # Ingen skannade något: det är en tidsgräns, inte ett sidfel.
+        with self.assertRaises(BankIDTimeout):
             await _driver().run(server, max_restarts=2)
         self.assertEqual(server.initializes, 3)
 

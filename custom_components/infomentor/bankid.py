@@ -270,6 +270,11 @@ class BankIDDriver:
             qr_data = answer.get("qrData") or qr_data
             if state not in ("PENDING", "ERROR"):
                 scanned = True
+            if state == "ERROR" and not scanned and restarts >= max_restarts:
+                # Ingen skannade någon av ordrarna: det är en tidsgräns, inte ett sidfel.
+                raise BankIDTimeout(
+                    f"ingen skannade QR-koden i {restarts + 1} order (var och en ca 30 s)"
+                )
             if state == "ERROR" and not scanned and restarts < max_restarts:
                 # En ickeskannad QR-order dör efter ca 30 s med ERROR: starta en ny.
                 restarts += 1
