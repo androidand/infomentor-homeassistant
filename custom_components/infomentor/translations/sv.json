@@ -20,16 +20,26 @@
           "username": "E-post",
           "password": "Lösenord"
         }
+      },
+      "bankid_retry": {
+        "title": "BankID-inloggningen misslyckades",
+        "description": "Tryck på Skicka för att starta en ny BankID-inloggning."
       }
     },
     "error": {
       "invalid_auth": "Fel e-post eller lösenord.",
       "cannot_connect": "Kunde inte nå InfoMentor.",
-      "unknown": "Oväntat fel."
+      "unknown": "Oväntat fel.",
+      "bankid_denied": "BankID-inloggningen avbröts.",
+      "bankid_timeout": "BankID-inloggningen tog för lång tid. Försök igen.",
+      "bankid_page_changed": "BankID-flödet avbröts eller sidan har ändrats. Försök igen."
     },
     "abort": {
       "already_configured": "Det här kontot är redan konfigurerat.",
       "reauth_successful": "Inloggad igen."
+    },
+    "progress": {
+      "bankid": "{message}\n\nÖppna BankID-appen på din telefon: {autostart_url}"
     }
   },
   "options": {

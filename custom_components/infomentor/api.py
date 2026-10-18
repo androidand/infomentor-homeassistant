@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 from datetime import date, timedelta
 from time import time
 from typing import Any
@@ -27,6 +28,7 @@ from .token_client import (
     TokenRevoked,
     bridge_web_session,
     make_aiohttp_request,
+    pair_app_token,
 )
 from .token_client import (
     refresh_token as app_refresh_token,
@@ -107,17 +109,18 @@ class InfomentorApi:
 
     async def async_login_with_bankid(
         self, *, idp: str = "stockholm_par", progress: Any | None = None
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], str]:
         """Inloggning med interaktiv BankID (Phase B: Stockholm Stad).
 
         Kör driver:n (bankid.py) som styr SiteMinder + PhenixID till en
         SAMLResponse/SMSESSION, byter sedan den mot en hub-cookie-jar med IMHome
         via `bridge_web_session` (login.ashx -> LoginCallback -> IMHome). Används
-        i config-flödet som en aktiv step med async_show_progress; ingen token
-        roterar här — det nya IMHome-sätts direkt i HAs session.
+        i config-flödet som ett progress-steg. Webbsessionen räcker bara ~40 min, så
+        därefter parar vi den till appens roterande refresh-token, den hållbara
+        uppgiften, som returneras tillsammans med barnen: (barn, refresh_token).
 
-        Kastar InvalidAuth (bridgen avvisades), CannotConnect (nere) eller en
-        översatt BankIDError (avböjt/tid ut/ändrad sida).
+        Kastar InvalidAuth (bridgen eller parningen avvisades), CannotConnect (nere)
+        eller en översatt BankIDError (avböjt/tid ut/ändrad sida).
         """
         # 1. Kör driver:n till SAMLResponse/SMSESSION.
         driver = BankIDDriver()
@@ -130,7 +133,7 @@ class InfomentorApi:
         api_request = make_aiohttp_request(self._api_session)
         try:
             jar = await driver.post_saml_response(
-                api_request, saml_response=result.saml_response, smsession=result.smsession
+                api_request, saml_response=result.saml_response, jar=result.jar
             )
         except TokenError as err:
             await self._close_auxiliary_session()
@@ -141,10 +144,21 @@ class InfomentorApi:
         await self._set_cookie_jar(jar)
         _, root = await self._follow(f"{HUB_BASE}/")
         if "selectedPupilName" not in root:
+            await self._close_auxiliary_session()
             raise InvalidAuth("inloggningen avvisades — BankID-svaret accepterades inte")
         self.pupils = extract_pupils(root)
         _LOGGER.debug("Inloggad via BankID, %d barn hittade", len(self.pupils))
-        return self.pupils
+
+        # 4. Para webbsessionen till appens refresh-token (single holder, roterar).
+        try:
+            token = await pair_app_token(
+                api_request, jar, device_identifier=secrets.token_hex(8)
+            )
+        except TokenError as err:
+            raise InvalidAuth(f"parningen avvisades: {err}") from err
+        finally:
+            await self._close_auxiliary_session()
+        return self.pupils, token["refresh_token"]
 
     async def async_login_with_token(
         self, refresh_token: str, *, on_rotated=None

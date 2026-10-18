@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -163,45 +164,120 @@ async def test_migrate_v1_to_v2(hass: HomeAssistant) -> None:
     assert entry.data["auth_mode"] == "token"
 
 
-async def test_bankid_flow_shows_idp_step(hass: HomeAssistant) -> None:
-    """BankID-flödet visar ett IDP-val först."""
+@pytest.fixture
+def bankid_validate():
+    """Byter ut driver:n för hela testet. `box["fn"]` sätts av testet.
+
+    Måste gälla hela testet: bakgrundsuppgiften startar först efter ett await, så ett
+    patch som bara omsluter anropet som skapar uppgiften skulle släppa igenom det
+    riktiga nätverksanropet.
+    """
+    box: dict = {}
+
+    async def _call(hass, idp, progress):
+        return await box["fn"](hass, idp, progress)
+
+    with (
+        patch("custom_components.infomentor.config_flow._validate_bankid", _call),
+        patch("custom_components.infomentor.async_setup_entry", return_value=True),
+    ):
+        yield box
+
+
+async def _finish_bankid(hass: HomeAssistant, flow_id: str):
+    """Låt bakgrundsuppgiften bli klar. HA går vidare av sig självt när den är det, så
+    flödet kan redan vara avslutat; då finns resultatet i config-posterna."""
+    await hass.async_block_till_done()
+    try:
+        return await hass.config_entries.flow.async_configure(flow_id)
+    except data_entry_flow.UnknownFlow:
+        return None
+
+
+async def _start_bankid(hass: HomeAssistant):
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"method": "bankid"}
-    )
-    assert result["type"] == data_entry_flow.FlowResultType.FORM
-    assert result["step_id"] == "bankid"
+    return await hass.config_entries.flow.async_configure(result["flow_id"], {"method": "bankid"})
 
 
-async def test_bankid_qr_step_shows_qr_selector(hass: HomeAssistant) -> None:
-    """BankID-qr-steget visar en QrCodeSelector med QR-data."""
+async def test_bankid_flow_shows_progress_then_creates_entry(
+    hass: HomeAssistant, bankid_validate
+) -> None:
+    """Menyval -> progress medan BankID väntar -> färdig -> post."""
     from custom_components.infomentor.bankid import BankIDStep
 
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_USER}
-    )
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"method": "bankid"}
-    )
+    release = asyncio.Event()
 
-    qr_data = "bankid:///?autostarttoken=abc123&redirect=null"
+    async def fake_validate(hass, idp, progress):
+        await progress(BankIDStep("Skanna QR", qr_data="q", autostart_url="bankid:///?x=1"))
+        await release.wait()
+        return [{"id": "1"}], "rt-new"
 
-    async def _fake_validate(hass, idp, progress):
-        await progress(BankIDStep("Väntar på BankID…", qr_data=qr_data, autostart_url=qr_data))
-        return [{"id": "1"}]
+    bankid_validate["fn"] = fake_validate
+    result = await _start_bankid(hass)
+    assert result["type"] == data_entry_flow.FlowResultType.SHOW_PROGRESS
+    assert result["step_id"] == "bankid"
+    assert result["description_placeholders"]["autostart_url"] == "bankid:///?x=1"
 
-    with patch(
-        "custom_components.infomentor.config_flow._validate_bankid",
-        _fake_validate,
-    ):
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {"idp": "stockholm_par"}
-        )
+    release.set()
+    await _finish_bankid(hass, result["flow_id"])
+    (entry,) = hass.config_entries.async_entries(DOMAIN)
+    # BankID är vägen till appens refresh-token; det är den som sparas.
+    assert entry.data == {"refresh_token": "rt-new", "auth_mode": "token"}
+    assert entry.title == "InfoMentor (1 barn)"
 
+
+async def test_bankid_failure_shows_error_and_retry_starts_a_new_order(
+    hass: HomeAssistant, bankid_validate
+) -> None:
+    """Ett BankID-fel visar felet; Skicka startar en ny order i stället för att fastna."""
+    from custom_components.infomentor.bankid import BankIDDenied
+
+    attempts = 0
+
+    async def fake_validate(hass, idp, progress):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise BankIDDenied("avbröt")
+        return [{"id": "1"}], "rt-new"
+
+    bankid_validate["fn"] = fake_validate
+    result = await _start_bankid(hass)
+    result = await _finish_bankid(hass, result["flow_id"])
     assert result["type"] == data_entry_flow.FlowResultType.FORM
-    assert result["step_id"] == "bankid_qr"
-    schema = result["data_schema"]
-    assert schema is not None
-    assert "qr" in schema.schema
+    assert result["step_id"] == "bankid_retry"
+    assert result["errors"] == {"base": "bankid_denied"}
+
+    # En omrendering (user_input=None) får inte starta en ny order; bara Skicka gör det.
+    again = await hass.config_entries.flow.async_configure(result["flow_id"])
+    assert again["step_id"] == "bankid_retry"
+    assert attempts == 1
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    await _finish_bankid(hass, result["flow_id"])
+    assert attempts == 2
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+
+
+async def test_bankid_task_is_cancelled_when_the_dialog_is_closed(
+    hass: HomeAssistant, bankid_validate
+) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def fake_validate(hass, idp, progress):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    bankid_validate["fn"] = fake_validate
+    result = await _start_bankid(hass)
+    await started.wait()
+    hass.config_entries.flow.async_abort(result["flow_id"])
+    await hass.async_block_till_done()
+    assert cancelled.is_set()

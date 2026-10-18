@@ -21,29 +21,25 @@
           "password": "Password"
         }
       },
-      "bankid": {
-        "title": "BankID login",
-        "description": "Select which school to sign in with.",
-        "data": {
-          "idp": "School"
-        }
-      },
-      "bankid_qr": {
-        "title": "Scan with BankID",
-        "description": "{message}\n\nScan the QR code with the BankID app, or tap the autostart link on your phone."
+      "bankid_retry": {
+        "title": "BankID login failed",
+        "description": "Press Submit to start a new BankID login."
       }
     },
     "error": {
       "invalid_auth": "Invalid email or password.",
       "cannot_connect": "Could not reach InfoMentor.",
       "unknown": "Unexpected error.",
-      "bankid_denied": "BankID login was denied.",
+      "bankid_denied": "BankID login was cancelled.",
       "bankid_timeout": "BankID login timed out. Try again.",
-      "bankid_page_changed": "BankID flow was interrupted. Try again."
+      "bankid_page_changed": "The BankID flow was interrupted or the page changed. Try again."
     },
     "abort": {
       "already_configured": "This account is already configured.",
       "reauth_successful": "Signed in again."
+    },
+    "progress": {
+      "bankid": "{message}\n\nOpen the BankID app on your phone: {autostart_url}"
     }
   },
   "options": {

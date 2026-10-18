@@ -160,6 +160,130 @@ def _as_token(data: dict[str, Any]) -> Token:
     }
 
 
+# ------------------------------------------------------- parning (webbsession -> appens token)
+AUTH_GUID_RE = re.compile(r"authGuid=([^&\"'\s]+)")
+AUTH_CODE_RE = re.compile(r"[?&]code=([^?&\s]+)")
+
+
+def _extract_json(body: str) -> Any:
+    """Hubbens svar läses av appen ur ett <pre>-element: tolerera JSON direkt eller i HTML."""
+    trimmed = body.strip()
+    start, end = trimmed.find("{"), trimmed.rfind("}")
+    chunk = trimmed[start : end + 1] if start >= 0 and end > start else trimmed
+    return json.loads(chunk.replace("&amp;", "&"))
+
+
+async def pair_app_token(
+    do_request: Any,
+    jar: CookieJar,
+    *,
+    device_identifier: str,
+    device_name: str = "Home Assistant",
+    hub_base: str = IM_HUB_BASE,
+    auth_base: str = IM_AUTH_BASE,
+) -> Token:
+    """Byt en webbsession (jar med IMHome) mot appens roterande refresh-token.
+
+    Webbsessionen räcker bara ~40 min; refresh-tokenen är den hållbara uppgiften.
+    GetAuthenticationData -> LoginOAuth2 (302 med engångskod) -> Token. Koden skickas
+    OKODAD (Retrofit `encoded = true`); omkodning ger HTTP 400. Samma kedja som
+    infomentor/src/app-auth.ts i androidand/api-clients. Kastar TokenError.
+    """
+    import urllib.parse
+
+    def headers_for(url: str, **extra: str) -> dict[str, str]:
+        out = {"User-Agent": USER_AGENT, **extra}
+        cookie = jar.cookie_header(url)
+        if cookie:
+            out["Cookie"] = cookie
+        return out
+
+    url = f"{hub_base}/account/pair/GetAuthenticationData"
+    resp = await _hop(
+        do_request,
+        "POST",
+        url,
+        headers_for(
+            url,
+            Accept="application/json, text/plain, */*",
+            **{
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-Requested-With": "XMLHttpRequest",
+            },
+        ),
+        "",
+    )
+    try:
+        status, text = resp.status, await resp.text()
+    finally:
+        resp.close()
+    if status != 200:
+        raise TokenError(
+            f"GetAuthenticationData svarade {status} — är webbsessionen (IMHome) giltig?"
+        )
+    try:
+        data = _extract_json(text)
+        guid = AUTH_GUID_RE.search(str(data.get("authenticationUrl", "")))
+    except (ValueError, AttributeError) as err:
+        raise TokenError("GetAuthenticationData gav ett oförbart svar") from err
+    if not guid:
+        raise TokenError("GetAuthenticationData gav ingen authGuid i authenticationUrl")
+
+    params = urllib.parse.urlencode(
+        {
+            "authGuid": guid.group(1),
+            "DeviceIdentifier": device_identifier,
+            "DeviceFriendlyName": device_name,
+            "DevicePlatform": APP_OAUTH["device_platform"],
+            "scope": APP_OAUTH["scope"],
+            "redirect_uri": APP_OAUTH["redirect_uri"],
+            "client_id": APP_OAUTH["client_id"],
+            "response_type": "code",
+            "isSandBox": "false",
+        }
+    )
+    url = f"{auth_base}/Authentication/Authentication/LoginOAuth2?{params}"
+    resp = await _hop(
+        do_request, "GET", url, headers_for(url, Accept="text/html,application/xhtml+xml,*/*")
+    )
+    try:
+        status, location = resp.status, resp.headers.get("Location") or ""
+    finally:
+        resp.close()
+    code = AUTH_CODE_RE.search(location)
+    if status != 302 or not code:
+        raise TokenError(
+            f"LoginOAuth2 gav ingen auktoriseringskod (status {status}) —"
+            " sessionen saknas eller är förbrukad"
+        )
+
+    body = (
+        f"code={code.group(1)}"
+        f"&client_id={APP_OAUTH['client_id']}"
+        f"&client_secret={APP_OAUTH['client_secret']}"
+        f"&redirect_uri={urllib.parse.quote(APP_OAUTH['redirect_uri'], safe='')}"
+        "&grant_type=authorization_code"
+    )
+    resp = await _hop(
+        do_request,
+        "POST",
+        f"{auth_base}/Authentication/OAuth2/Token",
+        {"Content-Type": "application/x-www-form-urlencoded"},
+        body,
+    )
+    try:
+        status, text = resp.status, await resp.text()
+    finally:
+        resp.close()
+    try:
+        token = json.loads(text)
+    except ValueError:
+        token = None
+    if status != 200 or not isinstance(token, dict) or not token.get("refresh_token"):
+        raise TokenError(f"Token-anropet vid parning misslyckades (status {status})")
+    return _as_token(token)
+
+
 # --------------------------------------------------------------- domare
 def classify_token_response(
     status: int,

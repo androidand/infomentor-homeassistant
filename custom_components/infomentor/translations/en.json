@@ -20,16 +20,26 @@
           "username": "Email",
           "password": "Password"
         }
+      },
+      "bankid_retry": {
+        "title": "BankID login failed",
+        "description": "Press Submit to start a new BankID login."
       }
     },
     "error": {
       "invalid_auth": "Invalid email or password.",
       "cannot_connect": "Could not reach InfoMentor.",
-      "unknown": "Unexpected error."
+      "unknown": "Unexpected error.",
+      "bankid_denied": "BankID login was cancelled.",
+      "bankid_timeout": "BankID login timed out. Try again.",
+      "bankid_page_changed": "The BankID flow was interrupted or the page changed. Try again."
     },
     "abort": {
       "already_configured": "This account is already configured.",
       "reauth_successful": "Signed in again."
+    },
+    "progress": {
+      "bankid": "{message}\n\nOpen the BankID app on your phone: {autostart_url}"
     }
   },
   "options": {
