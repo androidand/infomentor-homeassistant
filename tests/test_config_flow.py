@@ -139,6 +139,46 @@ async def test_token_flow_invalid_pasted_token(hass: HomeAssistant) -> None:
     assert result["errors"]["base"] == "invalid_auth"
 
 
+def test_account_id_is_stable_and_independent_of_the_token() -> None:
+    """unique_id är en hash av barn-id:na, inte tokenen — den roterar vid varje
+    inloggning och skulle annars ge ett nytt unique_id per login."""
+    from custom_components.infomentor.config_flow import _account_id
+
+    pupils = [{"id": "2"}, {"id": "1"}]
+    # Oberoende av ordning och av tokenen.
+    assert _account_id(pupils) == _account_id(list(reversed(pupils)))
+    assert _account_id(pupils) != _account_id([{"id": "1"}, {"id": "3"}])
+    uid = _account_id(pupils)
+    assert len(uid) == 16
+    assert uid != TOKEN_INPUT["refresh_token"][:16]
+
+
+async def test_token_rotation_does_not_change_the_unique_id(hass: HomeAssistant) -> None:
+    """Samma barn, ny token → samma unique_id, så dubblett-detekteringen slår till."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user_token"}
+    )
+    with patch(
+        VALIDATE_TOKEN, AsyncMock(return_value=([{"id": "1"}, {"id": "2"}], "token-1"))
+    ):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], TOKEN_INPUT)
+    assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+    first_uid = result["result"].unique_id
+
+    # Ny inloggning: samma barn, roterad token. Måste slås som redan konfigurerad.
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user_token"}
+    )
+    with patch(
+        VALIDATE_TOKEN, AsyncMock(return_value=([{"id": "1"}, {"id": "2"}], "token-2"))
+    ):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], TOKEN_INPUT)
+
+    assert result["type"] == data_entry_flow.FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert first_uid is not None
+
+
 async def test_migrate_v1_keeps_the_password_login_working(hass: HomeAssistant) -> None:
     """HA kör migreringen i __init__.py. En v1-post med lösenord måste behålla sina
     uppgifter och få auth_mode=password, annars slutar en fungerande inloggning gälla."""
