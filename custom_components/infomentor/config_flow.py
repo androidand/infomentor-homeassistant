@@ -15,7 +15,6 @@ from homeassistant.config_entries import (
     ConfigFlowResult,
     OptionsFlow,
 )
-from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .api import (
@@ -244,12 +243,6 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({}),
             errors={"base": self._bankid_state.get("error") or "unknown"},
         )
-
-    @callback
-    def async_remove(self) -> None:
-        """Avbryt BankID-uppgiften om dialogen stängs mitt i inloggningen."""
-        if self._bankid_task is not None and not self._bankid_task.done():
-            self._bankid_task.cancel()
 
     async def async_step_password(
         self, user_input: dict[str, Any] | None = None

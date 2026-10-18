@@ -264,6 +264,8 @@ async def test_bankid_failure_shows_error_and_retry_starts_a_new_order(
 async def test_bankid_task_is_cancelled_when_the_dialog_is_closed(
     hass: HomeAssistant, bankid_validate
 ) -> None:
+    # HA avbryter progress_task själv när flödet avbryts; testet låser det beteendet,
+    # så att ingen egen städning behövs och ingen läcker en väntande BankID-order.
     started = asyncio.Event()
     cancelled = asyncio.Event()
 
