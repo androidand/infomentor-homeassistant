@@ -255,23 +255,6 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
         return self.async_show_form(step_id="password", data_schema=STEP_USER_SCHEMA, errors=errors)
 
-    async def async_migrate_entry(self, entry: ConfigEntry) -> bool:
-        """Migrera från v1 (användarnamn/lösenord) till v2 (hållbar token).
-
-        Vi tar bort lösenordet och sätter auth_mode=token; utan en sparad token
-        gör coordinatoren ConfigEntryAuthFailed -> om-auth, där användaren klistrar
-        in en frisk app-token.
-        """
-        if entry.version >= 2:
-            return True
-        _LOGGER.debug("Migrerar %s från version %s till 2", entry.title, entry.version)
-        new_data = dict(entry.data)
-        new_data.pop(CONF_PASSWORD, None)
-        new_data.pop(CONF_USERNAME, None)
-        new_data[CONF_AUTH_MODE] = "token"
-        self.hass.config_entries.async_update_entry(entry, version=2, data=new_data)
-        return True
-
     async def async_step_user_token(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:

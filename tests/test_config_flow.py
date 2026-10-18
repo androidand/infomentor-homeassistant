@@ -139,8 +139,11 @@ async def test_token_flow_invalid_pasted_token(hass: HomeAssistant) -> None:
     assert result["errors"]["base"] == "invalid_auth"
 
 
-async def test_migrate_v1_to_v2(hass: HomeAssistant) -> None:
-    """V1-post (användarnamn/lösenord) migreras till v2 med auth_mode=token."""
+async def test_migrate_v1_keeps_the_password_login_working(hass: HomeAssistant) -> None:
+    """HA kör migreringen i __init__.py. En v1-post med lösenord måste behålla sina
+    uppgifter och få auth_mode=password, annars slutar en fungerande inloggning gälla."""
+    from custom_components.infomentor import async_migrate_entry
+
     entry = ConfigEntry(
         data={"username": "user@example.com", "password": "hemligt"},
         discovery_keys={},
@@ -155,13 +158,18 @@ async def test_migrate_v1_to_v2(hass: HomeAssistant) -> None:
     )
     hass.config_entries._entries[entry.entry_id] = entry
 
-    flow = InfomentorConfigFlow()
-    flow.hass = hass
-    assert await flow.async_migrate_entry(entry) is True
+    assert await async_migrate_entry(hass, entry) is True
     assert entry.version == 2
-    assert "password" not in entry.data
-    assert "username" not in entry.data
-    assert entry.data["auth_mode"] == "token"
+    assert entry.data["username"] == "user@example.com"
+    assert entry.data["password"] == "hemligt"
+    assert entry.data["auth_mode"] == "password"
+
+
+def test_config_flow_has_no_unused_migration() -> None:
+    """ConfigFlow.async_migrate_entry anropas aldrig av HA men raderade lösenordet.
+    Den låg kvar som en fälla för den som kopplar in den; migreringen hör hemma i
+    __init__.py."""
+    assert not hasattr(InfomentorConfigFlow, "async_migrate_entry")
 
 
 @pytest.fixture
