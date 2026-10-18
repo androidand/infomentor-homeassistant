@@ -198,6 +198,15 @@ async def test_no_approval_in_time_is_a_timeout() -> None:
         await driver().run(Chain(["PENDING"] * 5), timeout=-1)
 
 
+async def test_the_saml_field_is_found_whatever_the_attribute_order() -> None:
+    reordered = ASSERTION.replace(
+        'name="SAMLResponse" value="ENCODED-ASSERT"', 'value="ENCODED-ASSERT" name="SAMLResponse"'
+    )
+    assert (
+        await driver().run(Chain(["OK"], assertion=reordered))
+    ).saml_response == "ENCODED-ASSERT"
+
+
 # ---- the pages stop looking like the chain --------------------------------------------------
 @pytest.mark.parametrize(
     "chain",
