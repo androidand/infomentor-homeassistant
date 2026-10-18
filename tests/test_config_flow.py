@@ -161,3 +161,47 @@ async def test_migrate_v1_to_v2(hass: HomeAssistant) -> None:
     assert "password" not in entry.data
     assert "username" not in entry.data
     assert entry.data["auth_mode"] == "token"
+
+
+async def test_bankid_flow_shows_idp_step(hass: HomeAssistant) -> None:
+    """BankID-flödet visar ett IDP-val först."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"method": "bankid"}
+    )
+    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["step_id"] == "bankid"
+
+
+async def test_bankid_qr_step_shows_qr_selector(hass: HomeAssistant) -> None:
+    """BankID-qr-steget visar en QrCodeSelector med QR-data."""
+    from custom_components.infomentor.bankid import BankIDStep
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"method": "bankid"}
+    )
+
+    qr_data = "bankid:///?autostarttoken=abc123&redirect=null"
+
+    async def _fake_validate(hass, idp, progress):
+        await progress(BankIDStep("Väntar på BankID…", qr_data=qr_data, autostart_url=qr_data))
+        return [{"id": "1"}]
+
+    with patch(
+        "custom_components.infomentor.config_flow._validate_bankid",
+        _fake_validate,
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"idp": "stockholm_par"}
+        )
+
+    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["step_id"] == "bankid_qr"
+    schema = result["data_schema"]
+    assert schema is not None
+    assert "qr" in schema.schema

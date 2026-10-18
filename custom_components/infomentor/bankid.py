@@ -92,8 +92,9 @@ class BankIDStep:
     """En framskridande step att visa i config-flödet."""
 
     message: str
-    qrcode_url: str | None = None
+    qr_data: str | None = None
     autostart_url: str | None = None
+    state: str = "PENDING"
     action: str = "bankid"  # progress_action
     task: str = "bankid"  # progress_task (HA >= 2024.8 kräver detta)
 
@@ -242,11 +243,12 @@ class BankIDDriver:
         if not isinstance(init_json, dict) or "order" not in init_json:
             raise BankIDPageChanged(f"PhenixID initialize gav oförbart svar: {init_body[:120]!r}")
         order_id = init_json["order"]
+        token = init_json.get("token", "")
         qr_data = init_json.get("qrData")
 
         # Hopp 5 — polla verifyorder tills BankID-appen godkänner (eller tiden går ut).
         return await self._poll_verifyorder(
-            do_request, phenixid_base, headers, order_id, qr_data, jar, progress, interval
+            do_request, phenixid_base, headers, order_id, token, qr_data, jar, progress, interval
         )
 
     async def _poll_verifyorder(
@@ -255,25 +257,18 @@ class BankIDDriver:
         phenixid_base: str,
         common_headers: dict[str, str],
         order_id: str,
+        token: str,
         qr_data: str | None,
         jar: CookieJar,
         progress: Any | None,
         interval: float,
     ) -> BankIDResult:
         verify_url = f"{phenixid_base}/NECSadcmbid/authenticate/NECSadcmbid"
+        autostart = f"bankid:///?autostarttoken={token}&redirect=null" if token else None
         poll_count = 0
         started = time.monotonic()
+        last_qr = ""
         while poll_count < MAX_POLL_ATTEMPTS:
-            if progress:
-                await progress(
-                    BankIDStep(
-                        "Skanna QR-koden i BankID-appen",
-                        qrcode_url=self._qr_data_url(qr_data),
-                        autostart_url=self._autostart_url(phenixid_base, order_id, jar),
-                        action="bankid",
-                        task="bankid",
-                    )
-                )
             poll_count += 1
             await self._sleep(interval)
             qs = (
@@ -285,53 +280,86 @@ class BankIDDriver:
             status, headers, body, jar = await self._once(
                 do_request, "GET", check_url, headers=check_headers
             )
-            approved = self._verifyorder_approved(body, status)
-            if approved == "approved":
-                # Godkänt: SiteMinderAuthADC sätter SMSESSION, redirectar till b64startpage.
-                adc_url = f"{verify_url}/SiteMinderAuthADC"
-                adc_qs = f"{self._phenixid_common_query(adc_url, common_headers)}"
-                adc_full = f"{adc_url}?{adc_qs}"
-                status, adc_headers, _, jar = await self._once(
-                    do_request,
-                    "GET",
-                    adc_full,
-                    headers=self._headers(adc_full, cookie=jar.cookie_header(adc_full)),
-                )
-                smsession = self._smsession_from_jar(jar)
-                location = adc_headers.get("location") or ""
-                if location:
-                    return BankIDResult(smsession=smsession or None, jar=jar)
-                if smsession:
-                    return BankIDResult(smsession=smsession, jar=jar)
-                # SiteMinderAuthADC godkänt men ingen session än — försök hämta SAMLResponse
-                # via saml2sso.
-                saml2sso = f"{SITEMINDER_BASE}/affwebservices/public/saml2sso"
-                status, _, html, jar = await self._once(
-                    do_request,
-                    "GET",
-                    saml2sso,
-                    headers=self._headers(saml2sso, cookie=jar.cookie_header(saml2sso)),
-                )
-                saml_response = self._extract_saml_response_form(html, saml2sso)
-                return BankIDResult(saml_response=saml_response, jar=jar)
-            if approved == "denied":
-                raise BankIDDenied("BankID-appen avböjde inloggningen")
+            poll_json = self._as_json(body)
+            if isinstance(poll_json, dict) and "state" in poll_json:
+                state = poll_json["state"]
+                qr_data = poll_json.get("qrData") or qr_data
+                if state == "OK":
+                    if progress:
+                        await progress(
+                            BankIDStep("Godkänt — slutför inloggning…", state="OK")
+                        )
+                    return await self._finish_after_ok(
+                        do_request, phenixid_base, common_headers, jar
+                    )
+                if state == "CANCELLED":
+                    raise BankIDDenied("BankID-appen avböjde inloggningen")
+                if state == "ERROR":
+                    if poll_count > 1:
+                        raise BankIDError("BankID-ordern gick ut — försök igen")
+                    continue
+            else:
+                approved = self._verifyorder_approved(body, status)
+                if approved == "approved":
+                    if progress:
+                        await progress(
+                            BankIDStep("Godkänt — slutför inloggning…", state="OK")
+                        )
+                    return await self._finish_after_ok(
+                        do_request, phenixid_base, common_headers, jar
+                    )
+                if approved == "denied":
+                    raise BankIDDenied("BankID-appen avböjde inloggningen")
+            if qr_data and qr_data != last_qr:
+                last_qr = qr_data
+                if progress:
+                    await progress(
+                        BankIDStep(
+                            "Skanna QR-koden i BankID-appen",
+                            qr_data=qr_data,
+                            autostart_url=autostart,
+                            state="PENDING",
+                        )
+                    )
             if time.monotonic() - started > MAX_POLL_SECONDS:
                 raise BankIDTimeout(
                     f"Tiden gick ut efter {int(time.monotonic() - started)} s utan godkännande"
                 )
         raise BankIDTimeout(f"Tiden gick ut efter {MAX_POLL_ATTEMPTS} polls utan godkännande")
 
-    @staticmethod
-    def _urlencode_saml_response(saml_response: str) -> str:
-        """Kodar SAMLResponse som application/x-www-form-urlencoded.
-
-        En Base64-kodad SAMLResponse kan innehålla +, / och = — dessa måste
-        percent-erkodas annars tolkas kroppen fel av mottagaren.
-        """
-        import urllib.parse
-
-        return urllib.parse.urlencode({"SAMLResponse": saml_response})
+    async def _finish_after_ok(
+        self,
+        do_request: Any,
+        phenixid_base: str,
+        common_headers: dict[str, str],
+        jar: CookieJar,
+    ) -> BankIDResult:
+        """Hämtar SMSESSION/SAMLResponse efter BankID-godkännande."""
+        verify_url = f"{phenixid_base}/NECSadcmbid/authenticate/NECSadcmbid"
+        adc_url = f"{verify_url}/SiteMinderAuthADC"
+        adc_qs = f"{self._phenixid_common_query(adc_url, common_headers)}"
+        adc_full = f"{adc_url}?{adc_qs}"
+        status, adc_headers, _, jar = await self._once(
+            do_request,
+            "GET",
+            adc_full,
+            headers=self._headers(adc_full, cookie=jar.cookie_header(adc_full)),
+        )
+        smsession = self._smsession_from_jar(jar)
+        location = adc_headers.get("location") or ""
+        if location:
+            return BankIDResult(smsession=smsession or None, jar=jar)
+        if smsession:
+            return BankIDResult(smsession=smsession, jar=jar)
+        saml2sso = f"{SITEMINDER_BASE}/affwebservices/public/saml2sso"
+        status, _, html, jar = await self._once(
+            do_request,
+            "GET",
+            saml2sso,
+            headers=self._headers(saml2sso, cookie=jar.cookie_header(saml2sso)),
+        )
+        saml_response = self._extract_saml_response_form(html, saml2sso)
+        return BankIDResult(saml_response=saml_response, jar=jar)
 
     @staticmethod
     def _urlencode_saml_response(saml_response: str) -> str:
@@ -583,31 +611,5 @@ class BankIDDriver:
             return None
 
     @staticmethod
-    def _qr_data_url(qr_data: str | None) -> str | None:
-        """Bygg BankID-autostart-URL:n ur qrData (base64-encoded JSON)."""
-        if not qr_data:
-            return None
-        import base64
-        import json
-
-        try:
-            padded = qr_data + "=" * (-len(qr_data) % 4)
-            decoded = base64.b64decode(padded).decode("utf-8", errors="ignore")
-            data = json.loads(decoded)
-        except Exception:  # noqa: BLE001
-            return None
-        # BankID autostart: bankid://scan?... eller bankid://qr?...
-        return data.get("autostart") or data.get("qr") or None
-
-    @staticmethod
-    def _autostart_url(phenixid_base: str, order_id: str, jar: CookieJar) -> str | None:
-        """Fallback autostart-URL om qrData inte kan dekoding."""
-        if not order_id:
-            return None
-        return f"{phenixid_base}/NECSadcmbid/authenticate/NECSadcmbid?order={order_id}"
-
-    @staticmethod
     async def _sleep(seconds: float) -> None:
-
-
         await asyncio.sleep(seconds)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from typing import Any
 
@@ -81,36 +83,18 @@ async def _validate_credentials(hass, username: str, password: str) -> list[dict
 
 
 async def _validate_bankid(
-    hass, idp: str, show_progress
+    hass, idp: str, progress
 ) -> list[dict[str, Any]]:
     """Logga in med interaktiv BankID via driver:n.
 
-    Kör driver:n med async_show_progress (QR/autostart + uppgift som pollar).
+    Kör driver:n med en progress-callback som uppdaterar UI:t.
     Använder en egen session som stängs efteråt. Kastar BankIDError-typer,
     InvalidAuth (bridgen avvisades) eller CannotConnect (nere).
     """
     session = await _make_session()
     try:
         api = InfomentorApi(session)
-
-        async def _progress(step):
-            # Bygg en beskrivning som bär QR-kod/autostart så UI:t kan visa dem.
-            description = step.message
-            parts = []
-            if step.autostart_url:
-                parts.append(f"Autostart: {step.autostart_url}")
-            if description:
-                parts.append(description)
-            if step.qrcode_url:
-                parts.append(f"QR: {step.qrcode_url}")
-            await show_progress(
-                progress_action=step.action,
-                progress_task=step.task,
-                description="\n".join(p for p in parts if p),
-                item_number=0,
-            )
-
-        return await api.async_login_with_bankid(idp=idp, progress=_progress)
+        return await api.async_login_with_bankid(idp=idp, progress=progress)
     finally:
         await session.close()
 
@@ -138,6 +122,13 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 2
 
+    def __init__(self) -> None:
+        """Initiera flödet med BankID-bakgrundsuppgift."""
+        super().__init__()
+        self._bankid_task: asyncio.Task | None = None
+        self._bankid_idp: str = IDP_STOCKHOLM_PAR
+        self._bankid_state: dict[str, Any] = {}
+
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Meny: välj app-token (rekommenderat) eller användarnamn/lösenord."""
         if user_input is not None:
@@ -158,31 +149,108 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Interaktiv BankID-inloggning (Phase B: Stockholm Stad).
 
-        Visar en aktiv step med async_show_progress: QR-kod/autostart-länk och en
-        uppgift som pollar IdP:t tills BankID-appen godkänner. Kör driver:n och
-        konvergerar vid hubbens LoginCallback.
+        Steg 1: användaren väljer IDP.
+        Steg 2 (bankid_qr): visar QR-kod (QrCodeSelector) + autostart-länk.
+        En bakgrundsuppgift pollar driver:n; när BankID godkänner skapas entry:t.
 
         Endast Stockholm Stad (SiteMinder) stöds idag; andra skolor får token-klistring.
         """
         errors: dict[str, str] = {}
         if user_input is not None:
             idp = user_input.get("idp", IDP_STOCKHOLM_PAR)
-            try:
-                pupils = await _validate_bankid(self.hass, idp, self.async_show_progress)
-            except BankIDDenied:
-                errors["base"] = "bankid_denied"
-            except BankIDTimeout:
-                errors["base"] = "bankid_timeout"
-            except (BankIDPageChanged, BankIDError):
-                errors["base"] = "bankid_page_changed"
-            except InvalidAuth:
-                errors["base"] = "invalid_auth"
-            except CannotConnect:
-                errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Oväntat fel vid BankID-inloggning")
-                errors["base"] = "unknown"
-            else:
+            self._bankid_idp = idp
+            return await self.async_step_bankid_qr()
+        return self.async_show_form(
+            step_id="bankid",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("idp", default=IDP_STOCKHOLM_PAR): selector.TextSelector(),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_bankid_qr(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Visar QR-kod + autostart-länk och pollar BankID i bakgrunden.
+
+        Kör driver:n som en bakgrundsuppgift. QR-koden visas via QrCodeSelector.
+        När BankID godkänner skapas entry:t; vid fel visas felmeddelande.
+        """
+        from .bankid import BankIDStep
+
+        idp = self._bankid_idp
+        state = self._bankid_state
+
+        # Första anropet: initiera tillstånd och starta driver:n.
+        if not state:
+            state.update(
+                {
+                    "qr_data": None,
+                    "autostart_url": None,
+                    "message": "Startar BankID…",
+                    "done": False,
+                    "pupils": None,
+                    "error": None,
+                }
+            )
+
+            async def _progress(step: BankIDStep) -> None:
+                state["message"] = step.message
+                if step.qr_data:
+                    state["qr_data"] = step.qr_data
+                if step.autostart_url:
+                    state["autostart_url"] = step.autostart_url
+                if step.state == "OK":
+                    state["done"] = True
+
+            async def _run_driver() -> None:
+                try:
+                    pupils = await _validate_bankid(self.hass, idp, _progress)
+                    state["pupils"] = pupils
+                except BankIDDenied:
+                    state["error"] = "bankid_denied"
+                except BankIDTimeout:
+                    state["error"] = "bankid_timeout"
+                except (BankIDPageChanged, BankIDError):
+                    state["error"] = "bankid_page_changed"
+                except InvalidAuth:
+                    state["error"] = "invalid_auth"
+                except CannotConnect:
+                    state["error"] = "cannot_connect"
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("Oväntat fel vid BankID-inloggning")
+                    state["error"] = "unknown"
+                finally:
+                    state["done"] = True
+
+            self._bankid_task = self.hass.async_create_task(_run_driver())
+
+        task = self._bankid_task
+
+        # Bygg beskrivningstext.
+        description = state["message"]
+        if state["autostart_url"]:
+            description += f"\n\nAutostart: {state['autostart_url']}"
+
+        # Användaren har skickat in formuläret — kontrollera driver:n.
+        if user_input is not None and state["done"]:
+            if state["error"] and task and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            if state["error"]:
+                return self.async_show_form(
+                    step_id="bankid",
+                    data_schema=vol.Schema(
+                        {
+                            vol.Required("idp", default=idp): selector.TextSelector(),
+                        }
+                    ),
+                    errors={"base": state["error"]},
+                )
+                pupils = state["pupils"]
                 await self.async_set_unique_id(f"bankid-{idp}")
                 self._abort_if_unique_id_configured()
                 title = "InfoMentor (BankID)"
@@ -195,14 +263,23 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
                         "idp": idp,
                     },
                 )
-        return self.async_show_form(
-            step_id="bankid",
-            data_schema=vol.Schema(
+
+        # Visa formen med QR-kod (om tillgänglig) + status.
+        if state["qr_data"]:
+            schema: vol.Schema = vol.Schema(
                 {
-                    vol.Required("idp", default=IDP_STOCKHOLM_PAR): selector.TextSelector(),
+                    vol.Required("qr"): selector.QrCodeSelector(
+                        selector.QrCodeSelectorConfig(data=state["qr_data"])
+                    ),
                 }
-            ),
-            errors=errors,
+            )
+        else:
+            schema = vol.Schema({})
+
+        return self.async_show_form(
+            step_id="bankid_qr",
+            data_schema=schema,
+            description_placeholders={"message": description},
         )
 
     async def async_step_password(
@@ -304,10 +381,26 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
                     _pupils, rotated = await _validate_refresh_token(self.hass, refresh_token)
                     data_updates[CONF_REFRESH_TOKEN] = rotated
                 elif auth_mode == "bankid":
+                    from .bankid import BankIDStep
+
+                    async def _reauth_progress(step: BankIDStep) -> None:
+                        description = step.message
+                        parts = []
+                        if step.autostart_url:
+                            parts.append(f"Autostart: {step.autostart_url}")
+                        if description:
+                            parts.append(description)
+                        await self.async_show_progress(
+                            progress_action=step.action,
+                            progress_task=step.task,
+                            description="\n".join(p for p in parts if p),
+                            item_number=0,
+                        )
+
                     _pupils = await _validate_bankid(
                         self.hass,
                         user_input.get("idp", IDP_STOCKHOLM_PAR),
-                        self.async_show_progress,
+                        _reauth_progress,
                     )
                 else:
                     username = user_input[CONF_USERNAME].strip()
