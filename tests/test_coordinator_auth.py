@@ -31,6 +31,7 @@ def _make_coordinator(hass: HomeAssistant, entry: ConfigEntry):
     coord._refresh_inflight = None
     coord._plan_details = {}
     coord._plan_ids_seen = set()
+    coord._not_permitted = set()
     coord.hass = hass
     return coord
 
