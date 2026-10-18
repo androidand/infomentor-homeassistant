@@ -12,6 +12,8 @@ import json
 import unittest
 from unittest.mock import patch
 
+import pytest
+
 from custom_components.infomentor.bankid import (
     BankIDDenied,
     BankIDDriver,
@@ -384,6 +386,43 @@ class TestPairAppToken(unittest.IsolatedAsyncioTestCase):
             await pair_app_token(do_request, CookieJar(), device_identifier="0" * 16)
 
 
+class TestWholeLoginToImHome(unittest.IsolatedAsyncioTestCase):
+    """run() -> post_saml_response() mot en server som svarar som hela kedjan, utan att
+    ersätta något av stegen: cookies från alla hopp ska ge IMHome i slutet."""
+
+    async def test_chain_ends_with_imhome_and_keeps_cookies_across_the_two_phases(self):
+        bank = FakeServer(["PENDING", "USER_SIGN", "OK"])
+        seen = {}
+
+        async def do_request(method, url, body=None, headers=None):
+            url = str(url)
+            if "sso.infomentor.se/login.ashx" in url and method == "POST":
+                seen["post_cookie"] = (headers or {}).get("Cookie", "")
+                seen["post_body"] = body
+                return FakeResponse(302, "", location="https://sso.infomentor.se/Login")
+            if url == "https://sso.infomentor.se/Login":
+                return FakeResponse(302, "", location="https://hub.infomentor.se/authentication/authentication/login?forceOAuth=true")
+            if "authentication/authentication/login" in url:
+                return FakeResponse(200, "<form action='https://infomentor.se/swedish/production/mentor/'><input name='oauth_token' value='tok+1'></form>")
+            if url == "https://infomentor.se/swedish/production/mentor/" and method == "POST":
+                seen["oauth_body"] = body
+                return FakeResponse(302, "", location="https://hub.infomentor.se/Authentication/Authentication/LoginCallback?x=1")
+            if "LoginCallback" in url:
+                return FakeResponse(200, "", set_cookies=["IMHome=1; Domain=.infomentor.se; Path=/"])
+            return await bank(method, url, body, headers)
+
+        driver = _driver()
+        result = await driver.run(bank)
+        jar = await driver.post_saml_response(
+            do_request, saml_response=result.saml_response, jar=result.jar
+        )
+        self.assertTrue(jar.has("IMHome"))
+        # Sessionscookien från första hoppet (login.ashx) följer med in i SAML-POST:en.
+        self.assertIn("ASP.NET_SessionId=s1", seen["post_cookie"])
+        self.assertEqual(seen["post_body"], "SAMLResponse=ENCODED-ASSERT")
+        self.assertEqual(seen["oauth_body"], "oauth_token=tok%2B1")
+
+
 class TestOauthTokenPost(unittest.IsolatedAsyncioTestCase):
     async def test_oauth_token_is_form_encoded(self):
         from custom_components.infomentor.token_client import _oauth_submit_to_callback
@@ -410,6 +449,13 @@ class TestHelpers(unittest.TestCase):
         value = BankIDDriver._extract_saml_response_form(ASSERTION, "https://x")
         self.assertEqual(value, "ENCODED-ASSERT")
 
+    def test_extract_saml_response_form_with_value_before_name(self):
+        html = (
+            "<form method='post' action='https://sso.infomentor.se/login.ashx'>"
+            "<input type='hidden' value='ASSERT-REVERSED' name='SAMLResponse'></form>"
+        )
+        self.assertEqual(BankIDDriver._extract_saml_response_form(html, "https://x"), "ASSERT-REVERSED")
+
     def test_extract_saml_response_form_none_without_login_ashx(self):
         self.assertIsNone(BankIDDriver._extract_saml_response_form("<html>x</html>", "https://x"))
 
@@ -420,3 +466,83 @@ class TestHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.usefixtures("socket_enabled")
+class TestRawCookieSessionThroughRealAiohttp(unittest.IsolatedAsyncioTestCase):
+    """Sett live: ordern blev OK men SAML-formen uteblev, för att aiohttp skrev om
+    `Cookie: Sess=ab/cd==` till `Sess="ab/cd=="`. Fixturer med fejkade svar kan inte se det,
+    så här går anropen genom riktiga aiohttp mot en lokal server som bara godkänner en
+    sessionscookie som kommer fram oförändrad."""
+
+    COOKIE = "Sess=ab/cd+ef=="
+
+    async def _server(self):
+        from aiohttp import web
+        from aiohttp.test_utils import TestServer
+
+        async def set_cookie(request):
+            resp = web.Response(text="ok")
+            resp.headers.add("Set-Cookie", f"{self.COOKIE}; Path=/")
+            return resp
+
+        async def protected(request):
+            if request.headers.get("Cookie") == self.COOKIE:
+                raise web.HTTPFound("/assertion")
+            return web.Response(text="the BankID page again")  # 200, som live
+
+        app = web.Application()
+        app.router.add_get("/set", set_cookie)
+        app.router.add_get("/protected", protected)
+        server = TestServer(app)
+        await server.start_server()
+        return server
+
+    async def _protected_status(self, session):
+        from custom_components.infomentor.token_client import make_aiohttp_request
+
+        server = await self._server()
+        try:
+            do_request = make_aiohttp_request(session)
+            jar = CookieJar()
+            driver = _driver()
+            await driver._send(do_request, jar, "GET", str(server.make_url("/set")))
+            status, _, _ = await driver._send(do_request, jar, "GET", str(server.make_url("/protected")))
+            return status
+        finally:
+            await session.close()
+            await server.close()
+
+    async def test_the_session_cookie_arrives_unchanged_with_the_raw_session(self):
+        from custom_components.infomentor.api import new_raw_cookie_session
+
+        self.assertEqual(await self._protected_status(new_raw_cookie_session()), 302)
+
+    async def test_an_ordinary_cookie_jar_session_breaks_it(self):
+        """Bevisar att testet kan fela: samma anrop med HA:s vanliga jar ger 200."""
+        import aiohttp
+
+        session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
+        self.assertEqual(await self._protected_status(session), 200)
+
+    async def test_login_with_bankid_and_the_token_path_use_the_raw_session(self):
+        from unittest.mock import patch
+
+        import aiohttp
+
+        from custom_components.infomentor.api import InfomentorApi
+
+        api = InfomentorApi(aiohttp.ClientSession())
+        seen = {}
+
+        async def fake_run(self_, do_request, **kwargs):
+            seen["jar"] = type(api._api_session.cookie_jar)
+            raise BankIDError("stop")
+
+        with (
+            patch("custom_components.infomentor.api.BankIDDriver.run", fake_run),
+            self.assertRaises(BankIDError),
+        ):
+            await api.async_login_with_bankid()
+        self.assertIs(seen["jar"], aiohttp.DummyCookieJar)
+        await api._session.close()

@@ -244,6 +244,7 @@ class BankIDDriver:
         scanned = False
         state = "PENDING"
         last = ""
+        last_logged = ""
         while True:
             key = f"{state}|{qr_data}"
             if key != last and state in WAITING_STATES:
@@ -270,6 +271,9 @@ class BankIDDriver:
             qr_data = answer.get("qrData") or qr_data
             if state not in ("PENDING", "ERROR"):
                 scanned = True
+            if state != last_logged:
+                _LOGGER.debug("BankID-order %s: %s", order[:8], state)
+                last_logged = state
             if state == "ERROR" and not scanned and restarts >= max_restarts:
                 # Ingen skannade någon av ordrarna: det är en tidsgräns, inte ett sidfel.
                 raise BankIDTimeout(
@@ -278,6 +282,9 @@ class BankIDDriver:
             if state == "ERROR" and not scanned and restarts < max_restarts:
                 # En ickeskannad QR-order dör efter ca 30 s med ERROR: starta en ny.
                 restarts += 1
+                _LOGGER.debug(
+                    "BankID-ordern gick ut oskannad, startar en ny (%d/%d)", restarts, max_restarts
+                )
                 order, token, qr_data = await self._initialize(do_request, jar, auth_url)
                 autostart = f"bankid:///?autostarttoken={token}&redirect=null"
                 state = "PENDING"
@@ -394,6 +401,14 @@ class BankIDDriver:
         )
         if value:
             return value.group(1)
+        # Samma fält med attributen i omvänd ordning (value före name).
+        reverse = re.search(
+            r'value=["\']([^"\']*)["\'][^>]*name=["\']SAMLResponse["\']',
+            html,
+            re.IGNORECASE,
+        )
+        if reverse:
+            return reverse.group(1)
         # Annars: en form vars action är saml2sso med en SAMLResponse-query.
         saml = re.search(r"SAMLResponse=([^&\"]+)", html)
         if saml:
