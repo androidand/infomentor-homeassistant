@@ -1,9 +1,9 @@
 """QR-koden som en svartvit bild, oberoende av HA:s tema.
 
-HA:s `ha-qr-code` ritar de mörka rutorna i temats textfärg på kortets bakgrund. I mörkt
-tema blir det en inverterad QR-kod (ljus på mörkt) som BankID-appen kan vägra läsa, och
-elementet har inget färgalternativ. En markdown-beskrivning får inte heller sätta stil. Så
-koden ritas här som en SVG, svart på vitt med en tyst zon, och skickas som en data-URI.
+HA:s `ha-qr-code` ritar de mörka rutorna i temats textfärg; i mörkt tema blir det
+en inverterad kod som BankID-appen kan vägra läsa, och elementet har inget
+färgalternativ. Koden ritas därför här som en SVG, svart på vitt med tyst zon,
+och skickas som en data-URI.
 """
 
 from __future__ import annotations
