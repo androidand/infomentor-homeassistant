@@ -384,6 +384,43 @@ class TestPairAppToken(unittest.IsolatedAsyncioTestCase):
             await pair_app_token(do_request, CookieJar(), device_identifier="0" * 16)
 
 
+class TestWholeLoginToImHome(unittest.IsolatedAsyncioTestCase):
+    """run() -> post_saml_response() mot en server som svarar som hela kedjan, utan att
+    ersätta något av stegen: cookies från alla hopp ska ge IMHome i slutet."""
+
+    async def test_chain_ends_with_imhome_and_keeps_cookies_across_the_two_phases(self):
+        bank = FakeServer(["PENDING", "USER_SIGN", "OK"])
+        seen = {}
+
+        async def do_request(method, url, body=None, headers=None):
+            url = str(url)
+            if "sso.infomentor.se/login.ashx" in url and method == "POST":
+                seen["post_cookie"] = (headers or {}).get("Cookie", "")
+                seen["post_body"] = body
+                return FakeResponse(302, "", location="https://sso.infomentor.se/Login")
+            if url == "https://sso.infomentor.se/Login":
+                return FakeResponse(302, "", location="https://hub.infomentor.se/authentication/authentication/login?forceOAuth=true")
+            if "authentication/authentication/login" in url:
+                return FakeResponse(200, "<form action='https://infomentor.se/swedish/production/mentor/'><input name='oauth_token' value='tok+1'></form>")
+            if url == "https://infomentor.se/swedish/production/mentor/" and method == "POST":
+                seen["oauth_body"] = body
+                return FakeResponse(302, "", location="https://hub.infomentor.se/Authentication/Authentication/LoginCallback?x=1")
+            if "LoginCallback" in url:
+                return FakeResponse(200, "", set_cookies=["IMHome=1; Domain=.infomentor.se; Path=/"])
+            return await bank(method, url, body, headers)
+
+        driver = _driver()
+        result = await driver.run(bank)
+        jar = await driver.post_saml_response(
+            do_request, saml_response=result.saml_response, jar=result.jar
+        )
+        self.assertTrue(jar.has("IMHome"))
+        # Sessionscookien från första hoppet (login.ashx) följer med in i SAML-POST:en.
+        self.assertIn("ASP.NET_SessionId=s1", seen["post_cookie"])
+        self.assertEqual(seen["post_body"], "SAMLResponse=ENCODED-ASSERT")
+        self.assertEqual(seen["oauth_body"], "oauth_token=tok%2B1")
+
+
 class TestOauthTokenPost(unittest.IsolatedAsyncioTestCase):
     async def test_oauth_token_is_form_encoded(self):
         from custom_components.infomentor.token_client import _oauth_submit_to_callback
@@ -409,6 +446,13 @@ class TestHelpers(unittest.TestCase):
     def test_extract_saml_response_form(self):
         value = BankIDDriver._extract_saml_response_form(ASSERTION, "https://x")
         self.assertEqual(value, "ENCODED-ASSERT")
+
+    def test_extract_saml_response_form_with_value_before_name(self):
+        html = (
+            "<form method='post' action='https://sso.infomentor.se/login.ashx'>"
+            "<input type='hidden' value='ASSERT-REVERSED' name='SAMLResponse'></form>"
+        )
+        self.assertEqual(BankIDDriver._extract_saml_response_form(html, "https://x"), "ASSERT-REVERSED")
 
     def test_extract_saml_response_form_none_without_login_ashx(self):
         self.assertIsNone(BankIDDriver._extract_saml_response_form("<html>x</html>", "https://x"))
