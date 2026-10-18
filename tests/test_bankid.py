@@ -106,7 +106,10 @@ ASSERTION = (
 class FakeServer:
     """Skriptad server. `states` är verifyorder-svaren i tur och ordning."""
 
-    def __init__(self, states, *, chooser=CHOOSER, assertion=ASSERTION, poll_status=200):
+    def __init__(
+        self, states, *, chooser=CHOOSER, assertion=ASSERTION, poll_status=200, init_body=None
+    ):
+        self.init_body = init_body
         self.states = list(states)
         self.chooser = chooser
         self.assertion = assertion
@@ -143,6 +146,8 @@ class FakeServer:
             self.initializes += 1
             payload = {"token": f"tok{self.initializes}", "order": f"ord{self.initializes}",
                        "qrData": f"qr{self.initializes}.0"}
+            if self.init_body is not None:
+                return FakeResponse(200, self.init_body, headers={"content-type": "text/html"})
             return FakeResponse(200, json.dumps(payload),
                                 headers={"content-type": "application/json;charset=UTF-8"})
         if "verifyorder=" in url:
@@ -185,6 +190,24 @@ class TestBankIDRun(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(steps[0][2], "bankid:///?autostarttoken=tok1&redirect=null")
         self.assertEqual(steps[-1][0], "OK")
         self.assertIn("USER_SIGN", [s[0] for s in steps])
+
+    async def test_every_new_qr_is_reported_in_order(self):
+        server = FakeServer(["PENDING", "PENDING", "PENDING", "OK"])
+        qrs = []
+
+        async def progress(step):
+            if step.qr_data:
+                qrs.append(step.qr_data)
+
+        await _driver().run(server, progress=progress)
+        self.assertEqual(len(qrs), 4)  # den första ordern + en ny per poll
+        self.assertEqual(len(set(qrs)), 4)
+        self.assertEqual(qrs[0], "qr1.0")
+
+    async def test_initialize_answering_html_raises(self):
+        server = FakeServer(["OK"], init_body="<html>BankID är nere</html>")
+        with self.assertRaises(BankIDPageChanged):
+            await _driver().run(server)
 
     async def test_api_calls_keep_the_siteminder_query_byte_for_byte(self):
         server = FakeServer(["OK"])
