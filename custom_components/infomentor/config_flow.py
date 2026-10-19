@@ -56,13 +56,6 @@ STEP_USER_SCHEMA = vol.Schema(
     }
 )
 
-STEP_TOKEN_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_REFRESH_TOKEN): selector.TextSelector(
-            selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
-        ),
-    }
-)
 
 
 async def _make_session() -> aiohttp.ClientSession:
@@ -92,22 +85,6 @@ async def _validate_bankid(
     try:
         api = InfomentorApi(session)
         return await api.async_login_with_bankid(idp=idp, progress=progress)
-    finally:
-        await session.close()
-
-
-async def _validate_refresh_token(hass, refresh_token: str) -> tuple[list[dict[str, Any]], str]:
-    """Validera en pastad refresh-token; returnerar (barn, roterad_token).
-
-    Den roterade tokenen fångas via on_rotated så att vi sparar den nya — den
-    pastade är förbrukad så snart refreshen gått (persist-before-use).
-    """
-    session = await _make_session()
-    try:
-        api = InfomentorApi(session)
-        captured: list[str] = []
-        pupils = await api.async_login_with_token(refresh_token, on_rotated=captured.append)
-        return pupils, (captured[0] if captured else refresh_token)
     finally:
         await session.close()
 
@@ -157,8 +134,6 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Meny: välj inloggningsmetod."""
         if user_input is not None:
-            if user_input["method"] == "user_token":
-                return await self.async_step_user_token()
             if user_input["method"] == "bankid":
                 return await self.async_step_bankid()
             return await self.async_step_password()
@@ -168,7 +143,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required("method", default="bankid"): selector.SelectSelector(
                         selector.SelectSelectorConfig(
-                            options=["bankid", "user_token", "password"],
+                            options=["bankid", "password"],
                             translation_key="method",
                             mode=selector.SelectSelectorMode.LIST,
                         )
@@ -273,33 +248,6 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
             errors = {"base": error}
         return self.async_show_form(step_id="password", data_schema=STEP_USER_SCHEMA, errors=errors)
 
-    async def async_step_user_token(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Inloggning med en pastad refresh-token (BankID-givna)."""
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            refresh_token = user_input[CONF_REFRESH_TOKEN].strip()
-            error, result = await _attempt(
-                _validate_refresh_token(self.hass, refresh_token),
-                "Oväntat fel vid token-inloggning",
-            )
-            if error is None:
-                pupils, rotated = result
-                await self.async_set_unique_id(_account_id(pupils))
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title=_title(pupils),
-                    data={
-                        CONF_REFRESH_TOKEN: rotated,
-                        CONF_AUTH_MODE: "token",
-                    },
-                )
-            errors = {"base": error}
-        return self.async_show_form(
-            step_id="user_token", data_schema=STEP_TOKEN_SCHEMA, errors=errors
-        )
-
     async def async_step_reauth(self, _entry_data: dict[str, Any]) -> ConfigFlowResult:
         """Starta om-auth när uppgifterna slutat gälla."""
         return await self.async_step_reauth_confirm()
@@ -307,14 +255,11 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Om-auth: lösenordsform, eller en meny för token-konton (BankID eller klistrad token)."""
+        """Om-auth: BankID för token-konton, annars lösenordsformuläret."""
         entry = self._get_reauth_entry()
         errors: dict[str, str] = {}
         if entry.data.get(CONF_AUTH_MODE, "password") == "token":
-            # BankID ger en ny token direkt; att klistra in en finns kvar som alternativ.
-            return self.async_show_menu(
-                step_id="reauth_confirm", menu_options=["bankid", "reauth_token"]
-            )
+            return await self.async_step_bankid()
         if user_input is not None:
             username = user_input[CONF_USERNAME].strip()
             error, _ = await _attempt(
@@ -340,29 +285,6 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
     @staticmethod
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
         return InfomentorOptionsFlow()
-
-    async def async_step_reauth_token(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Om-auth genom att klistra in en ny app-token."""
-        entry = self._get_reauth_entry()
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            refresh_token = user_input[CONF_REFRESH_TOKEN].strip()
-            error, result = await _attempt(
-                _validate_refresh_token(self.hass, refresh_token),
-                "Oväntat fel vid om-auth",
-            )
-            if error is None:
-                _pupils, rotated = result
-                return self.async_update_reload_and_abort(
-                    entry, data_updates={CONF_REFRESH_TOKEN: rotated, CONF_AUTH_MODE: "token"}
-                )
-            errors = {"base": error}
-        return self.async_show_form(
-            step_id="reauth_token", data_schema=STEP_TOKEN_SCHEMA, errors=errors
-        )
-
 
 class InfomentorOptionsFlow(OptionsFlow):
     """Inställningar: intervall, skolmat och smeknamn."""

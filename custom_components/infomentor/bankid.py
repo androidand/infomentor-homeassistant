@@ -7,7 +7,7 @@ Kedjan (verifierad live; se infomentor/docs/auth-research.md i androidand/api-cl
 postar det till login.ashx och landar i hubben.
 
 Det här är Stockholm Stads sidor, inte BankIDs eget API: en ändrad sida ska felklassas
-tydligt så att användaren kan falla tillbaka på token-klistring.
+tydligt (BankIDPageChanged) i stället för att ge ett obegripligt fel.
 """
 
 from __future__ import annotations
@@ -57,8 +57,7 @@ class BankIDDenied(BankIDError):
 
 
 class BankIDPageChanged(BankIDError):
-    """En IdP-sida såg annorlunda ut än förväntat. Felaklassa så användaren
-    kan falla tillbaka på token-klistring."""
+    """En IdP-sida såg annorlunda ut än förväntat."""
 
 
 @dataclass

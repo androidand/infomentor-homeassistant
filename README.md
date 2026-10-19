@@ -6,8 +6,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A first-class Home Assistant integration for **InfoMentor** (the Swedish school
-platform, "Mentor" / "InfoMentor Hub"). It signs in with BankID, an app token,
-or email/password and turns your children's school day into sensors you can build
+platform, "Mentor" / "InfoMentor Hub"). It signs in with BankID or
+email/password and turns your children's school day into sensors you can build
 automations on.
 
 > ⚠️ **Unofficial and not affiliated with InfoMentor.** For personal use with
@@ -54,16 +54,14 @@ folder and restart.
 
 ## Configuration
 
-Sign in one of three ways:
+Sign in one of two ways:
 
 - **BankID (Stockholm Stad only)** — scan a QR code with the BankID app, or tap
   the link on the phone that has it.
-- **App token** — paste the rotating refresh token that a one-time BankID login
-  hands back (from the InfoMentor app or the companion CLI).
 - **Email and password** — for municipalities that still use the classic
   account.
 
-The integration stores the token (not a password) and refreshes it every run,
+With BankID the integration stores a rotating refresh token (not a password) and refreshes it every run,
 then discovers every child on the account and creates the entities above.
 Sensitive fields are redacted in the diagnostics file.
 
@@ -112,7 +110,7 @@ entities:
 The integration talks directly to `hub.infomentor.se` using `aiohttp` (bundled
 with Home Assistant — no extra dependencies).
 
-With an **app token**, each run refreshes the token (it rotates on every use and
+With **BankID**, each run refreshes the token (it rotates on every use and
 is written back before it is used), bridges to the hub, and fetches the data. A
 `REVOKED` token triggers re-authentication; a blocked or down endpoint retries
 without re-authenticating, so a flaky front-end never logs you out.
@@ -130,8 +128,8 @@ face of it.
 
 - **"Invalid email or password"** – check the credentials at
   <https://infomentor.se/swedish/production/mentor/>; some municipalities use SSO.
-- **Re-authentication prompt** – the stored credential was rejected. In token
-  mode Home Assistant asks for a fresh app token; in password mode it asks for
+- **Re-authentication prompt** – the stored credential was rejected. With BankID
+  Home Assistant asks you to scan a new QR code; in password mode it asks for
   the password again (nothing is logged out permanently).
 - **No entities** – make sure the account actually has children with an active
   placement.

@@ -16,7 +16,6 @@ from homeassistant.core import HomeAssistant  # noqa: E402
 from custom_components.infomentor.api import (  # noqa: E402
     CannotConnect,
     InvalidAuth,
-    RevokedAuth,
 )
 from custom_components.infomentor.config_flow import InfomentorConfigFlow  # noqa: E402
 from custom_components.infomentor.const import DOMAIN  # noqa: E402
@@ -24,8 +23,6 @@ from custom_components.infomentor.const import DOMAIN  # noqa: E402
 USER_INPUT = {"username": "foralder@example.com", "password": "hemligt"}  # noqa: S105
 VALIDATE = "custom_components.infomentor.config_flow._validate_credentials"
 
-TOKEN_INPUT = {"refresh_token": "paste-refresh-token-abc123"}
-VALIDATE_TOKEN = "custom_components.infomentor.config_flow._validate_refresh_token"
 
 
 async def _start_password_flow(hass: HomeAssistant) -> dict:
@@ -44,24 +41,12 @@ async def _start_password_flow(hass: HomeAssistant) -> dict:
 
 
 async def test_user_flow_shows_menu(hass: HomeAssistant) -> None:
-    """Första steget är en meny med app-token och lösenord."""
+    """Första steget är en meny med BankID och lösenord."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
     assert result["type"] == data_entry_flow.FlowResultType.FORM
     assert result["step_id"] == "user"
-
-
-async def test_menu_routes_to_token(hass: HomeAssistant) -> None:
-    """Att välja app-token i menyn leder till token-steget."""
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_USER}
-    )
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"method": "user_token"}
-    )
-    assert result["type"] == data_entry_flow.FlowResultType.FORM
-    assert result["step_id"] == "user_token"
 
 
 async def test_user_flow_creates_entry(hass: HomeAssistant) -> None:
@@ -108,37 +93,6 @@ async def test_already_configured(hass: HomeAssistant) -> None:
     assert second["reason"] == "already_configured"
 
 
-async def test_token_flow_creates_entry(hass: HomeAssistant) -> None:
-    """En pastad refresh-token valideras och posten sparar den ROTERADE tokenen."""
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": "user_token"}
-    )
-    assert result["type"] == data_entry_flow.FlowResultType.FORM
-    assert result["step_id"] == "user_token"
-
-    with patch(
-        VALIDATE_TOKEN,
-        AsyncMock(return_value=([{"id": "1"}, {"id": "2"}], "rotated-token-xyz")),
-    ):
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], TOKEN_INPUT)
-
-    assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
-    assert result["data"]["refresh_token"] == "rotated-token-xyz"
-    assert result["data"]["auth_mode"] == "token"
-
-
-async def test_token_flow_invalid_pasted_token(hass: HomeAssistant) -> None:
-    """En token servern avvisar som REVOKED visar invalid_auth och skapar inget."""
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": "user_token"}
-    )
-    with patch(VALIDATE_TOKEN, AsyncMock(side_effect=RevokedAuth("ogiltig"))):
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], TOKEN_INPUT)
-
-    assert result["type"] == data_entry_flow.FlowResultType.FORM
-    assert result["errors"]["base"] == "invalid_auth"
-
-
 def test_account_id_is_stable_and_independent_of_the_token() -> None:
     """unique_id är en hash av barn-id:na, inte tokenen — den roterar vid varje
     inloggning och skulle annars ge ett nytt unique_id per login."""
@@ -148,35 +102,28 @@ def test_account_id_is_stable_and_independent_of_the_token() -> None:
     # Oberoende av ordning och av tokenen.
     assert _account_id(pupils) == _account_id(list(reversed(pupils)))
     assert _account_id(pupils) != _account_id([{"id": "1"}, {"id": "3"}])
-    uid = _account_id(pupils)
-    assert len(uid) == 16
-    assert uid != TOKEN_INPUT["refresh_token"][:16]
+    assert len(_account_id(pupils)) == 16
 
 
-async def test_token_rotation_does_not_change_the_unique_id(hass: HomeAssistant) -> None:
-    """Samma barn, ny token → samma unique_id, så dubblett-detekteringen slår till."""
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": "user_token"}
-    )
-    with patch(
-        VALIDATE_TOKEN, AsyncMock(return_value=([{"id": "1"}, {"id": "2"}], "token-1"))
-    ):
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], TOKEN_INPUT)
-    assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
-    first_uid = result["result"].unique_id
+async def test_a_second_bankid_login_for_the_same_children_is_already_configured(
+    hass: HomeAssistant, bankid_validate
+) -> None:
+    """Varje BankID-inloggning ger en ny token; dubblett-detekteringen får inte bero på den."""
+    tokens = iter(["token-1", "token-2"])
 
-    # Ny inloggning: samma barn, roterad token. Måste slås som redan konfigurerad.
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": "user_token"}
-    )
-    with patch(
-        VALIDATE_TOKEN, AsyncMock(return_value=([{"id": "1"}, {"id": "2"}], "token-2"))
-    ):
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], TOKEN_INPUT)
+    async def fake_validate(hass, idp, progress):
+        return [{"id": "1"}, {"id": "2"}], next(tokens)
 
-    assert result["type"] == data_entry_flow.FlowResultType.ABORT
-    assert result["reason"] == "already_configured"
-    assert first_uid is not None
+    bankid_validate["fn"] = fake_validate
+    first = await _start_bankid(hass)
+    await _finish_bankid(hass, first["flow_id"])
+    (entry,) = hass.config_entries.async_entries(DOMAIN)
+
+    second = await _start_bankid(hass)
+    await _finish_bankid(hass, second["flow_id"])
+
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+    assert entry.data["refresh_token"] == "token-1"
 
 
 async def test_migrate_v1_keeps_the_password_login_working(hass: HomeAssistant) -> None:

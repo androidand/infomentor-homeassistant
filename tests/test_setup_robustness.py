@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -111,35 +112,14 @@ def token_entry(hass: HomeAssistant):
     return entry
 
 
-async def test_reauth_of_a_token_entry_offers_bankid_or_a_pasted_token(
+async def test_reauth_of_a_token_entry_goes_straight_to_bankid(
     hass: HomeAssistant, token_entry
 ) -> None:
-    result = await token_entry.start_reauth_flow(hass)
-    assert result["type"] == data_entry_flow.FlowResultType.MENU
-    assert result["menu_options"] == ["bankid", "reauth_token"]
+    async def never_scanned(*_):
+        await asyncio.Event().wait()
 
-
-async def test_reauth_token_step_exists_and_updates_the_entry(
-    hass: HomeAssistant, token_entry
-) -> None:
-    """Loggen: "Handler InfomentorConfigFlow doesn't support step reauth_token"."""
-    result = await token_entry.start_reauth_flow(hass)
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"next_step_id": "reauth_token"}
-    )
-    assert result["type"] == data_entry_flow.FlowResultType.FORM
-    assert result["step_id"] == "reauth_token"
-
-    with (
-        patch(
-            "custom_components.infomentor.config_flow._validate_refresh_token",
-            AsyncMock(return_value=([{"id": "1"}], "fresh")),
-        ),
-        patch("custom_components.infomentor.async_setup_entry", return_value=True),
-    ):
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {"refresh_token": "pasted"}
-        )
-    assert result["type"] == data_entry_flow.FlowResultType.ABORT
-    assert result["reason"] == "reauth_successful"
-    assert token_entry.data["refresh_token"] == "fresh"
+    with patch("custom_components.infomentor.config_flow._validate_bankid", never_scanned):
+        result = await token_entry.start_reauth_flow(hass)
+    assert result["type"] == data_entry_flow.FlowResultType.SHOW_PROGRESS
+    assert result["step_id"] == "bankid"
+    hass.config_entries.flow.async_abort(result["flow_id"])
