@@ -27,6 +27,7 @@ from .const import (
     CONF_AUTH_MODE,
     CONF_ENABLE_LUNCH,
     CONF_MATEO_UNIT,
+    CONF_REFRESH_TOKEN,
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL_MIN,
     DOMAIN,
@@ -95,7 +96,6 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
         self.api = InfomentorApi(session)
         self._ok_calls = 0
         self._auth_skips = 0
-        self._refresh_inflight: asyncio.Future[None] | None = None
         # Delar hubben redan avvisat medan sessionen levde (se _safe); loggas bara en gång.
         self._not_permitted: set[str] = set()
         # planerings-id -> {"at": monotonic(), "info": {...}}
@@ -132,85 +132,35 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
                 raise UpdateFailed(f"Kunde inte nå InfoMentor: {err2}") from err2
 
     async def _login(self) -> list[dict[str, Any]]:
-        """Logga in — dispatch på lagrat auth_mode.
+        """Logga in enligt postens auth_mode (password eller token).
 
-        password: befintligt lösenordsflöde (async_login). token: hållbara
-        refresh-token-flödet (friska + bridge). bankid: interaktiv BankID krävs per
-        inloggning; en entry utan sparat token/ lösenord får ConfigEntryAuthFailed så
-        HA startar om-auth.
-
-        RevokedAuth = token död -> reauth. CannotConnect = F5/Framända eller nere,
-        -> UpdateFailed (försök igen), aldrig reauth. Token rotaras internt och
-        skrivs tillbaka till config-posten, serialiserad per post.
+        Fel uppgifter eller död token: reauth. Nere eller blockerad: försök igen, aldrig reauth.
         """
-        auth_mode = self.entry.data.get(CONF_AUTH_MODE, "password")
-        if auth_mode == "password":
-            try:
-                return await self.api.async_login()
-            except InvalidAuth as err:
-                raise ConfigEntryAuthFailed(str(err)) from err
-            except CannotConnect as err:
-                raise UpdateFailed(f"Kunde inte nå InfoMentor: {err}") from err
-
-        if auth_mode == "bankid":
-            # BankID kräver interaktiv inloggning per pass; utan sparat token/ lösenord
-            # kan vi inte återupprätta sessionen vid omstart. Höjs som ConfigEntryAuthFailed
-            # så HA startar om-auth (BankID igen). Hålls isär från token-vägen nedan.
-            raise ConfigEntryAuthFailed(
-                "BankID-inloggning kräver interaktion – starta om-auth"
-            )
-
-        refresh_token = self.entry.data.get("refresh_token")
-        if not refresh_token:
-            raise ConfigEntryAuthFailed(
-                "ingen refresh-token i config-posten – starta reauth"
-            )
         try:
-            return await self._refresh_and_login(refresh_token)
-        except RevokedAuth as err:
+            if self.entry.data.get(CONF_AUTH_MODE, "password") == "password":
+                return await self.api.async_login()
+            return await self._login_with_token()
+        except (InvalidAuth, RevokedAuth) as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except CannotConnect as err:
             raise UpdateFailed(f"Kunde inte nå InfoMentor: {err}") from err
 
-    async def _refresh_and_login(self, refresh_token: str) -> list[dict[str, Any]]:
-        """Friska token och logga in.
-
-        Två parallella uppdateringar delar *en enda* refresh (in-flight dedup): båda
-        får samma nya access-token, och endast ett token-anrop görs. Den roterade
-        refresh-tokenen skrivs tillbaka *innan* bridge körs (i mark_rotated), så att
-        ett haveri mellan refresh och bridge inte lämnar en utgången token.
-        """
-        if self._refresh_inflight is None:
-            self._refresh_inflight = asyncio.ensure_future(self._do_refresh(refresh_token))
-
-        refresh_task = self._refresh_inflight
-        try:
-            pupils, _new_token = await refresh_task
-        finally:
-            self._refresh_inflight = None
-
-        return pupils
-
-    async def _do_refresh(self, refresh_token: str):
-        """Gör refreshen och returnerar (pupils, rotated_token) för alla deltagare."""
-        rotated_holder: dict[str, str | None] = {"token": None}
-
-        def mark_rotated(new_token: str) -> None:
-            # Persist-before-use: skriv tillbaka den roterade token *nu*, innan bridge
-            # körs (api.py anropar on_rotated efter refresh, före bridge). Om bridge
-            # sedan havererar sitter vi på den nya token, inte den utgångna — nästa
-            # refresh lyckas istället för att ge en reauth-loop.
-            rotated_holder["token"] = new_token
-            self.hass.config_entries.async_update_entry(
-                self.entry, data={**self.entry.data, "refresh_token": new_token}
+    async def _login_with_token(self) -> list[dict[str, Any]]:
+        # Den roterande token har en enda ägare. Läs den inne i låset: en andra inloggning
+        # ska se den redan roterade, inte den förbrukade.
+        async with self._lock:
+            refresh_token = self.entry.data.get(CONF_REFRESH_TOKEN)
+            if not refresh_token:
+                raise ConfigEntryAuthFailed("ingen refresh-token i posten")
+            return await self.api.async_login_with_token(
+                refresh_token, on_rotated=self._store_token
             )
 
-        async with self._lock:
-            api = self.api
-            # async_login_with_token kallar mark_rotated efter refresh, innan bridge.
-            # Locket håller en enda ägare av den roterande token.
-            pupils = await api.async_login_with_token(refresh_token, on_rotated=mark_rotated)
-            return pupils, rotated_holder["token"]
+    def _store_token(self, token: str) -> None:
+        """Skriv den roterade token före något mer kan misslyckas, annars är nästa refresh död."""
+        self.hass.config_entries.async_update_entry(
+            self.entry, data={**self.entry.data, CONF_REFRESH_TOKEN: token}
+        )
 
     async def _fetch_all(
         self, pupils: list[dict[str, Any]], *, strict: bool = True

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import aiohttp
@@ -69,10 +71,10 @@ async def _make_session() -> aiohttp.ClientSession:
 
 
 async def _validate_credentials(hass, username: str, password: str) -> list[dict[str, Any]]:
-    """Logga in med en egen, tillfällig session och returnera barnen.
+    """Logga in i en egen session och returnera barnen.
 
-    Vi skapar en egen aiohttp-session (egna cookies för inloggningen) i stället
-    för HAs delade — då är det korrekt att stänga den, och HAs session rörs inte.
+    Egen session (egna cookies) i stället för HAs delade — då är det korrekt att
+    stänga den, och HAs session rörs inte.
     """
     session = await _make_session()
     try:
@@ -85,12 +87,7 @@ async def _validate_credentials(hass, username: str, password: str) -> list[dict
 async def _validate_bankid(
     hass, idp: str, progress
 ) -> tuple[list[dict[str, Any]], str]:
-    """Logga in med interaktiv BankID via driver:n.
-
-    Kör driver:n med en progress-callback som uppdaterar UI:t.
-    Använder en egen session som stängs efteråt. Kastar BankIDError-typer,
-    InvalidAuth (bridgen avvisades) eller CannotConnect (nere).
-    """
+    """Interaktiv BankID-inloggning i en egen session som stängs efteråt."""
     session = await _make_session()
     try:
         api = InfomentorApi(session)
@@ -100,12 +97,10 @@ async def _validate_bankid(
 
 
 async def _validate_refresh_token(hass, refresh_token: str) -> tuple[list[dict[str, Any]], str]:
-    """Validera en pastad refresh-token: friska, bridge, plocka barnen.
+    """Validera en pastad refresh-token; returnerar (barn, roterad_token).
 
-    Använder en egen session som stängs efteråt. Returnerar (barn, roterad_token)
-    på framgång, RevokedAuth på ogiltig token, CannotConnect på nere/F5. Roteringen
-    fångas via on_rotated så att vi sparar den NYA tokenen — den pastade är förbrukad
-    så snart refreshen gått (persist-before-use).
+    Den roterade tokenen fångas via on_rotated så att vi sparar den nya — den
+    pastade är förbrukad så snart refreshen gått (persist-before-use).
     """
     session = await _make_session()
     try:
@@ -117,20 +112,50 @@ async def _validate_refresh_token(hass, refresh_token: str) -> tuple[list[dict[s
         await session.close()
 
 
+def _account_id(pupils: Sequence[Mapping[str, Any]]) -> str:
+    """Stabilt kontoid: hash av de sorterade barn-id:na, inte tokenen.
+
+    Tokenen roterar vid varje inloggning och skulle ge ett nytt unique_id per
+    login; barn-id:na är stabila för kontot och gör dubblett-detekteringen
+    oberoende av vilken inloggningsväg som användes.
+    """
+    ids = sorted(str(pupil.get("id")) for pupil in pupils if pupil.get("id"))
+    return hashlib.sha256("\x1f".join(ids).encode()).hexdigest()[:16]
+
+
+def _title(pupils: Sequence[Mapping[str, Any]]) -> str:
+    return f"InfoMentor ({len(pupils)} barn)" if pupils else "InfoMentor"
+
+
+async def _attempt(coro, what: str) -> tuple[str | None, Any]:
+    """Kör ett inloggningsanrop; returnerar (felnyckel, resultat).
+
+    Felnyckeln är None vid lyckat anrop, annars en av formulärets felnycklar.
+    """
+    try:
+        return None, await coro
+    except (InvalidAuth, RevokedAuth):
+        return "invalid_auth", None
+    except CannotConnect:
+        return "cannot_connect", None
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception(what)
+        return "unknown", None
+
+
 class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
     """Sätt upp integrationen via UI."""
 
     VERSION = 2
 
     def __init__(self) -> None:
-        """Initiera flödet med BankID-bakgrundsuppgift."""
         super().__init__()
         self._bankid: BankIdLogin | None = None
         self._bankid_error = "unknown"
         self._bankid_detail = ""
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Meny: välj app-token (rekommenderat) eller användarnamn/lösenord."""
+        """Meny: välj inloggningsmetod."""
         if user_input is not None:
             if user_input["method"] == "user_token":
                 return await self.async_step_user_token()
@@ -157,10 +182,8 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Interaktiv BankID-inloggning (Stockholm Stad) som ett progress-steg.
 
-        Driver:n körs i bakgrunden (`BankIdLogin`). Varje ny QR-bild gör den lilla
-        väntan klar, HA kör steget igen, och steget svarar med en ny väntan och den nya
-        QR-koden; det är så en roterande QR kan visas i en dialog. Endast Stockholm
-        Stad stöds idag; andra skolor får token-klistring.
+        Varje ny QR-bild gör väntan klar så HA kör om steget och visar den nya
+        koden — så kan en roterande QR visas i en dialog.
         """
         if self._bankid is None:
             self._bankid = BankIdLogin(
@@ -180,10 +203,10 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_bankid_done(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Slutsteget: skapa posten, eller visa felet och låt användaren försöka igen.
+        """Slutsteget: skapa posten, eller visa felet för ett nytt försök.
 
-        BankID är bara sättet att få appens refresh-token (webbsessionen räcker ~40 min),
-        så posten sparas som `token`, det flöde koordinatorn och reauth redan kan.
+        BankID ger appens refresh-token (webbsessionen räcker ~40 min), så posten
+        sparas som `token` — det flöde koordinatorn och reauth redan kan.
         """
         login, self._bankid = self._bankid, None
         if login is None or login.error or login.outcome is None:
@@ -196,20 +219,19 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._get_reauth_entry(),
                 data_updates={CONF_REFRESH_TOKEN: refresh_token, CONF_AUTH_MODE: "token"},
             )
-        await self.async_set_unique_id(refresh_token[:12])
+        await self.async_set_unique_id(_account_id(pupils))
         self._abort_if_unique_id_configured()
-        title = f"InfoMentor ({len(pupils)} barn)" if pupils else "InfoMentor"
         return self.async_create_entry(
-            title=title,
+            title=_title(pupils),
             data={CONF_REFRESH_TOKEN: refresh_token, CONF_AUTH_MODE: "token"},
         )
 
     async def async_step_bankid_retry(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Visar felet. Först när användaren trycker Skicka startas en ny BankID-order.
+        """Visar felet; Skicka startar en ny order.
 
-        HA kan rendera om ett formsteg med user_input=None; det får inte starta en order.
+        HA kan rendera om steget med user_input=None — det får inte starta en order.
         """
         if user_input is not None:
             return await self.async_step_bankid()
@@ -233,29 +255,22 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             username = user_input[CONF_USERNAME].strip()
-            try:
-                pupils = await _validate_credentials(self.hass, username, user_input[CONF_PASSWORD])
-            except InvalidAuth:
-                errors["base"] = "invalid_auth"
-            except CannotConnect:
-                errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Oväntat fel vid inloggning")
-                errors["base"] = "unknown"
-            else:
+            error, pupils = await _attempt(
+                _validate_credentials(self.hass, username, user_input[CONF_PASSWORD]),
+                "Oväntat fel vid inloggning",
+            )
+            if error is None:
                 await self.async_set_unique_id(username.lower())
                 self._abort_if_unique_id_configured()
-                title = "InfoMentor"
-                if pupils:
-                    title = f"InfoMentor ({len(pupils)} barn)"
                 return self.async_create_entry(
-                    title=title,
+                    title=_title(pupils),
                     data={
                         CONF_USERNAME: username,
                         CONF_PASSWORD: user_input[CONF_PASSWORD],
                         CONF_AUTH_MODE: "password",
                     },
                 )
+            errors = {"base": error}
         return self.async_show_form(step_id="password", data_schema=STEP_USER_SCHEMA, errors=errors)
 
     async def async_step_user_token(
@@ -265,60 +280,50 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             refresh_token = user_input[CONF_REFRESH_TOKEN].strip()
-            try:
-                pupils, rotated = await _validate_refresh_token(self.hass, refresh_token)
-            except RevokedAuth:
-                errors["base"] = "invalid_auth"
-            except CannotConnect:
-                errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Oväntat fel vid token-inloggning")
-                errors["base"] = "unknown"
-            else:
-                await self.async_set_unique_id(refresh_token[:12])
+            error, result = await _attempt(
+                _validate_refresh_token(self.hass, refresh_token),
+                "Oväntat fel vid token-inloggning",
+            )
+            if error is None:
+                pupils, rotated = result
+                await self.async_set_unique_id(_account_id(pupils))
                 self._abort_if_unique_id_configured()
-                title = "InfoMentor"
-                if pupils:
-                    title = f"InfoMentor ({len(pupils)} barn)"
                 return self.async_create_entry(
-                    title=title,
+                    title=_title(pupils),
                     data={
                         CONF_REFRESH_TOKEN: rotated,
                         CONF_AUTH_MODE: "token",
                     },
                 )
+            errors = {"base": error}
         return self.async_show_form(
             step_id="user_token", data_schema=STEP_TOKEN_SCHEMA, errors=errors
         )
 
-    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
+    async def async_step_reauth(self, _entry_data: dict[str, Any]) -> ConfigFlowResult:
         """Starta om-auth när uppgifterna slutat gälla."""
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        """Om-auth: lösenordsform, eller en meny för token-konton (BankID eller klistrad token)."""
         entry = self._get_reauth_entry()
         errors: dict[str, str] = {}
-        auth_mode = entry.data.get(CONF_AUTH_MODE, "password")
-        if auth_mode in ("token", "bankid"):
+        if entry.data.get(CONF_AUTH_MODE, "password") == "token":
             # BankID ger en ny token direkt; att klistra in en finns kvar som alternativ.
             return self.async_show_menu(
                 step_id="reauth_confirm", menu_options=["bankid", "reauth_token"]
             )
         if user_input is not None:
-            try:
-                username = user_input[CONF_USERNAME].strip()
-                await _validate_credentials(self.hass, username, user_input[CONF_PASSWORD])
-            except (InvalidAuth, RevokedAuth):
-                errors["base"] = "invalid_auth"
-            except CannotConnect:
-                errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Oväntat fel vid om-auth")
-                errors["base"] = "unknown"
-            else:
+            username = user_input[CONF_USERNAME].strip()
+            error, _ = await _attempt(
+                _validate_credentials(self.hass, username, user_input[CONF_PASSWORD]),
+                "Oväntat fel vid om-auth",
+            )
+            if error is None:
                 return self.async_update_reload_and_abort(entry, data_updates=dict(user_input))
+            errors = {"base": error}
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=vol.Schema(
@@ -343,30 +348,19 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         entry = self._get_reauth_entry()
         errors: dict[str, str] = {}
         if user_input is not None:
-            try:
-                refresh_token = user_input[CONF_REFRESH_TOKEN].strip()
-                _pupils, rotated = await _validate_refresh_token(self.hass, refresh_token)
-            except (InvalidAuth, RevokedAuth):
-                errors["base"] = "invalid_auth"
-            except CannotConnect:
-                errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Oväntat fel vid om-auth")
-                errors["base"] = "unknown"
-            else:
+            refresh_token = user_input[CONF_REFRESH_TOKEN].strip()
+            error, result = await _attempt(
+                _validate_refresh_token(self.hass, refresh_token),
+                "Oväntat fel vid om-auth",
+            )
+            if error is None:
+                _pupils, rotated = result
                 return self.async_update_reload_and_abort(
                     entry, data_updates={CONF_REFRESH_TOKEN: rotated, CONF_AUTH_MODE: "token"}
                 )
+            errors = {"base": error}
         return self.async_show_form(
-            step_id="reauth_token",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_REFRESH_TOKEN): selector.TextSelector(
-                        selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
-                    ),
-                }
-            ),
-            errors=errors,
+            step_id="reauth_token", data_schema=STEP_TOKEN_SCHEMA, errors=errors
         )
 
 

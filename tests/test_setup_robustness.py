@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -143,26 +143,3 @@ async def test_reauth_token_step_exists_and_updates_the_entry(
     assert result["type"] == data_entry_flow.FlowResultType.ABORT
     assert result["reason"] == "reauth_successful"
     assert token_entry.data["refresh_token"] == "fresh"
-
-
-# ---------------------------------------------------------------- inloggningssessionen
-async def test_the_bridge_session_is_closed_after_a_successful_login() -> None:
-    """Loggen: "Unclosed client session" / "Unclosed connector" efter varje inloggning."""
-    import aiohttp
-
-    from custom_components.infomentor import api as api_module
-    from custom_components.infomentor.token_client import CookieJar
-
-    api = api_module.InfomentorApi(MagicMock())
-    api._session.cookie_jar = MagicMock()
-    api._set_cookie_jar = AsyncMock()
-    api._follow = AsyncMock(return_value=("u", "selectedPupilName"))
-    with (
-        patch.object(api_module, "app_refresh_token", AsyncMock(return_value={
-            "access_token": "a", "refresh_token": "r2", "token_type": "bearer", "expires_in": 600, "scope": "s"})),
-        patch.object(api_module, "bridge_web_session", AsyncMock(return_value=CookieJar())),
-        patch.object(api_module, "extract_pupils", return_value=[{"id": "1"}]),
-    ):
-        await api.async_login_with_token("r1")
-    assert api._api_session is None
-    assert aiohttp  # importerad för att tydliggöra vad som annars läcker

@@ -1,390 +1,231 @@
-"""Tester för token_client: friskning, domare och hub-bridge (kräver aiohttp).
-
-Här portas api-clients/infomentors tre delar utan nätverk:
-
-- `refresh_token`: byter refresh-token mot nya token; domar svaret REVOKED/BLOCKED.
-- `classify_token_response`: dömer efter form, inte status.
-- `bridge_web_session`: hela handoff-kedjan till en jar med IMHome, och varje hopp
-  degradert för sig så en varselvakt alltid ser röd ut i minst ett fall.
-"""
+"""token_client.py: refresh verdicts, pairing, the oauth_token hop, and the bridge to IMHome."""
 
 from __future__ import annotations
 
-import unittest
+import json
+from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 
-try:
-    import yarl
+from custom_components.infomentor.token_client import (
+    Blocked,
+    NetworkError,
+    TokenError,
+    TokenRevoked,
+    bridge_web_session,
+    classify_token_response,
+    make_aiohttp_request,
+    pair_app_token,
+    refresh_token,
+    submit_oauth_token,
+)
+from custom_components.infomentor.web import CookieJar
+from tests.fakes import FakeResponse, Router
 
-    from custom_components.infomentor.token_client import (
-        Blocked,
-        CookieJar,
-        TokenError,
-        TokenRevoked,
-        bridge_web_session,
-        classify_token_response,
-        make_aiohttp_request,
-        refresh_token,
+JSON = {"Content-Type": "application/json;charset=UTF-8"}
+IMHOME = "IMHome=1; Domain=.infomentor.se; Path=/"
+TOKEN = {"access_token": "a", "refresh_token": "rt2", "expires_in": 600, "token_type": "bearer"}
+
+
+# ---- the verdict: judged by the shape of the answer, not the status ----------------------
+@pytest.mark.parametrize(
+    ("status", "content_type", "body", "verdict"),
+    [
+        (200, "application/json", json.dumps(TOKEN), "ALIVE"),
+        (200, "application/json; charset=utf-8", json.dumps(TOKEN), "ALIVE"),
+        (200, "application/json", '{"error":"invalid_grant"}', "REVOKED"),
+        (400, "application/json", '{"error":"invalid_grant"}', "REVOKED"),
+        (400, "text/html", "<html>Bad Request</html>", "BLOCKED"),  # F5 in front of the endpoint
+        (200, "text/html", "", "BLOCKED"),
+        (200, "application/json", "{broken", "UNKNOWN"),
+        (200, "application/json", '{"x":1}', "UNKNOWN"),
+    ],
+)
+def test_the_verdict_follows_the_shape_of_the_answer(status, content_type, body, verdict) -> None:
+    assert classify_token_response(status, content_type, body)["verdict"] == verdict
+
+
+# ---- refresh ------------------------------------------------------------------------------
+async def test_refresh_sends_the_app_constants_and_returns_the_rotated_token() -> None:
+    router = Router().add(
+        "POST", "/OAuth2/Token", FakeResponse(200, json.dumps(TOKEN), headers=JSON)
+    )
+    token = await refresh_token(router, "old")
+    body = router.calls[0].body
+    assert "refresh_token=old" in body
+    assert "client_id=notificationapp" in body
+    assert "client_secret=NONE" in body
+    assert token["refresh_token"] == "rt2"
+
+
+@pytest.mark.parametrize(
+    ("response", "raised"),
+    [
+        (FakeResponse(400, '{"error":"invalid_grant"}', headers=JSON), TokenRevoked),
+        (FakeResponse(400, "<html>Bad Request</html>"), Blocked),  # never a reason for reauth
+    ],
+)
+async def test_refresh_failures_split_dead_token_from_blocked_front_end(response, raised) -> None:
+    with pytest.raises(raised):
+        await refresh_token(Router().add("POST", "/OAuth2/Token", response), "old")
+
+
+async def test_a_network_error_is_not_a_dead_token() -> None:
+    async def down(method, url, body=None, headers=None):
+        raise aiohttp.ClientConnectionError("down")
+
+    with pytest.raises(NetworkError):
+        await refresh_token(down, "old")
+
+
+async def test_requests_are_made_without_following_redirects() -> None:
+    session = MagicMock()
+    session.request = AsyncMock(return_value="response")
+    await make_aiohttp_request(session)("GET", "https://x.example/", None, {"A": "b"})
+    assert session.request.await_args.kwargs["allow_redirects"] is False
+
+
+# ---- pairing: web session -> the app's refresh token -----------------------------------------
+GET_AUTH_DATA = json.dumps({"authenticationUrl": "https://im.infomentor.se/x?authGuid=G-1&y=2"})
+
+
+def _pairing(*, auth_data=(200, f"<pre>{GET_AUTH_DATA}</pre>"), code="a+b/c==", token_status=200):
+    return (
+        Router()
+        .add("POST", "GetAuthenticationData", FakeResponse(*auth_data))
+        .add(
+            "GET",
+            "LoginOAuth2",
+            FakeResponse(302, location=f"InfomentorNotification://oauth2Callback/?code={code}"),
+        )
+        .add("POST", "/OAuth2/Token", FakeResponse(token_status, json.dumps(TOKEN)))
     )
 
-    AVAILABLE = True
-except Exception:  # noqa: BLE001
-    AVAILABLE = False
+
+async def test_pairing_sends_the_code_unencoded_and_the_session_cookie() -> None:
+    jar = CookieJar()
+    jar.set_from_header("IMHome=1; Domain=.infomentor.se; Path=/", "https://hub.infomentor.se")
+    router = _pairing()
+    token = await pair_app_token(router, jar, device_identifier="0123456789abcdef")
+    auth_data, authorize, exchange = router.calls
+    assert "IMHome=1" in auth_data.headers["Cookie"]
+    assert "authGuid=G-1" in authorize.url and "DeviceIdentifier=0123456789abcdef" in authorize.url
+    # Retrofit `encoded = true`: encoding the code gives HTTP 400.
+    assert exchange.body.startswith("code=a+b/c==")
+    assert token["refresh_token"] == "rt2"
 
 
-@pytest.fixture(autouse=True)
-def _no_hass_autouse():
-    """Dena testmodulen kräver ingen HA-hass (rent aiohttp + logik).
-
-    conftest.py har en autouse `enable_custom_integrations` som tar den nya
-    async `hass`-fixturen och bricker på äldre HA-versioner; vår logik hänger
-    inte på config-entry/nätverket, så vi undviker den här.
-    """
-    yield
-
-
-# --------------------------------------------------------------- mock-svar och session
-class HAHeaders(dict):
-    """Litet dict-subclass som stödje aiohttp:s getall (för Set-Cookie)."""
-
-    def __init__(self, data=None):
-        super().__init__()
-        for key, value in (data or {}).items():
-            if isinstance(value, list):
-                for item in value:
-                    self.setdefault(key.lower(), []).append(item)
-            else:
-                self[key.lower()] = value
-
-    def getall(self, key, default=None):
-        value = super().get(key.lower(), [])
-        return value if isinstance(value, list) else [value]
-
-    def get(self, key, default=None):
-        value = super().get(key.lower(), None)
-        if value is None:
-            return default
-        if isinstance(value, list):
-            return value[0] if value else default
-        return value
+@pytest.mark.parametrize(
+    "router",
+    [
+        _pairing(auth_data=(302, "")),  # web session rejected
+        _pairing(auth_data=(200, "<pre>not json</pre>")),
+        Router()
+        .add("POST", "GetAuthenticationData", FakeResponse(200, GET_AUTH_DATA))
+        .add("GET", "LoginOAuth2", FakeResponse(200)),  # no authorization code
+        _pairing(token_status=400),
+    ],
+    ids=["session-rejected", "unparseable", "no-code", "token-refused"],
+)
+async def test_pairing_fails_loudly(router) -> None:
+    with pytest.raises(TokenError):
+        await pair_app_token(router, CookieJar(), device_identifier="0" * 16)
 
 
-class FakeResponse:
-    def __init__(self, status=200, text="", headers=None, location=None):
-        self.status = status
-        self._text = text
-        self.headers = HAHeaders(headers or {})
-        if location is not None:
-            self.headers["Location"] = location
-
-    async def text(self):
-        return self._text
-
-    def close(self):
-        return None
-
-    @property
-    def url(self):
-        return yarl.URL("https://hub.infomentor.se")
-
-
-class FakeSession:
-    """Skriptad session: svar per url/metod. Spårar anropen för påståenden."""
-
-    def __init__(self, routes):
-        self._routes = routes
-        self.calls = []
-        self.allow_redirects_calls = []
-
-    def route(self, method, predicate, responder):
-        self._routes.append((method, predicate, responder))
-        return self
-
-    async def request(self, method, url, data=None, headers=None, allow_redirects=False, timeout=None):  # noqa: ANN001
-        self.calls.append((method, str(url), data, headers))
-        for route_method, predicate, responder in self._routes:
-            if route_method == method and predicate(str(url)):
-                return responder(str(url), method)
-        raise AssertionError(f"oväntat anrop: {method} {url}")
-
-    async def get(self, url, headers=None, timeout=None, allow_redirects=True):  # noqa: ANN001
-        self.allow_redirects_calls.append(allow_redirects)
-        return await self.request("GET", url, headers=headers)
-
-    async def post(self, url, data=None, headers=None, timeout=None, allow_redirects=True):  # noqa: ANN001
-        self.allow_redirects_calls.append(allow_redirects)
-        return await self.request("POST", url, data=data, headers=headers)
-
-    async def close(self):
-        return None
-
-
-class MockFetch:
-    """Injekterbar fetch: svar per url, spårar anropen.
-
-    Används som do_request(method, url, body, headers) -> svar i bridge_web_session.
-    """
-
-    def __init__(self, responses, *, expected=None):
-        """
-        responses: dict url-sökväg -> statiskt FakeResponse eller callable(self) -> svar.
-        expected: valfri lista url-sökvägen som måste ha träffat.
-        """
-        self._responses = responses
-        self._expected = expected or []
-        self.calls = []
-        self.posted_bodies = []
-        self.headers_per_call = []
-
-    async def __call__(self, method, url, body=None, headers=None):
-        if isinstance(url, yarl.URL):
-            url = str(url)
-        path = url.split("?", 1)[0]
-        self.calls.append((path, method))
-        self.headers_per_call.append(headers or {})
-        if body:
-            self.posted_bodies.append(str(body))
-        responder = self._responses.get(path)
-        if responder is None:
-            for rkey, rresponder in self._responses.items():
-                if path.endswith(rkey):
-                    responder = rresponder
-                    break
-        if responder is None:
-            raise AssertionError(f"oväntat mock-anrop: {method} {url}")
-        if callable(responder) and not isinstance(responder, FakeResponse):
-            return responder(self)
-        return responder
-
-
-# --------------------------------------------------------------- konstanter för kedjan
-IM_HUB = "https://hub.infomentor.se"
-IM_API = "https://api-im.infomentor.se"
-MENTOR = "https://infomentor.se"
-SSO_URL = f"{IM_API}/NA1/Authentication/sso"
-HANDOFF_URL = f"{MENTOR}/Swedish/Production/mentor/?login=remote&id=0Ab12"
-REQUEST_TOKEN_URL = f"{IM_HUB}/authentication/authentication/login"
-SUBMIT_URL = f"{MENTOR}/swedish/production/mentor/"
-CALLBACK_URL = f"{IM_HUB}/Authentication/Authentication/LoginCallback"
-
-REQUEST_TOKEN_PAGE = (
-    "<!DOCTYPE html><html><body><form method='post' action='"
-    + SUBMIT_URL
-    + "'><input type='hidden' name='oauth_token' value='t7Yx2Kq9Lm4' /></form></body></html>"
+# ---- request-token page -> POST -> LoginCallback ---------------------------------------------
+TOKEN_PAGE = (
+    '<form action="https://infomentor.se/swedish/production/mentor/" method="post">'
+    '<input type="hidden" name="oauth_token" value="a+b/c="></form>'
 )
 
 
-def good_responses():
-    """Hela handoff-kedjan som svarar korrekt, med IMHome sätts i hopp 5.
-
-    Nycklarna är path-only (utan query) — handoff-URL:n bär query-sträng.
-    """
-    handoff_path = MENTOR + "/Swedish/Production/mentor/"
-    request_token_path = "/authentication/authentication/login"
-    submit_path = "/swedish/production/mentor/"
-    return {
-        "/NA1/Authentication/sso": FakeResponse(
-            200,
-            '"https://infomentor.se/Swedish/Production/mentor/?login=remote&id=0Ab12"',
-            headers={"Content-Type": "application/json"},
-        ),
-        handoff_path: FakeResponse(
-            302,
-            "",
-            headers={
-                "Location": f"{IM_HUB}{request_token_path}?forceOAuth=true",
-                "Set-Cookie": ['.ASPXAUTH=auth; Path=/; HttpOnly'],
-            },
-        ),
-        request_token_path: FakeResponse(
-            200,
-            REQUEST_TOKEN_PAGE.replace(SUBMIT_URL, MENTOR + submit_path),
-            headers={"Content-Type": "text/html"},
-        ),
-        submit_path: FakeResponse(302, "", headers={"Location": f"{IM_HUB}/Authentication/Authentication/LoginCallback?apitype=im1"}),
-        "/Authentication/Authentication/LoginCallback": FakeResponse(
-            302,
-            "",
-            headers={
-                "Location": "/#/",
-                "Set-Cookie": ['IMHome=session-value; Path=/; HttpOnly', 'andsyl2=x; Path=/'],
-            },
-        ),
-        "/": FakeResponse(200, "<html>app</html>"),
-    }
+def _hub(
+    *,
+    page=TOKEN_PAGE,
+    callback=None,
+    submit_location="/cb",
+):
+    callback = callback or FakeResponse(200, set_cookies=[IMHOME])
+    return (
+        Router()
+        .add("GET", "authentication/login", FakeResponse(200, page))
+        .add("POST", "/mentor/", FakeResponse(302, location=submit_location))
+        .add("GET", "/cb", callback)
+    )
 
 
-# --------------------------------------------------------------- refresh_token
-@unittest.skipUnless(AVAILABLE, "kräver aiohttp och Home Assistant-paketet")
-class TestRefreshToken(unittest.IsolatedAsyncioTestCase):
-    async def test_refresh_returns_rotated_token(self):
-        session = FakeSession([]).route(
-            "POST",
-            lambda u: u.endswith("/OAuth2/Token"),
-            lambda u, m: FakeResponse(200, '{"access_token":"a1","refresh_token":"r1","token_type":"bearer","expires_in":600,"scope":"IM2-API-NOTIFICATION"}',
-                                      headers={"Content-Type": "application/json"}),
+async def test_the_oauth_token_is_form_encoded_and_imhome_ends_up_in_the_jar() -> None:
+    router = _hub()
+    jar = await submit_oauth_token(
+        router, CookieJar(), "https://hub.infomentor.se/authentication/login"
+    )
+    assert jar.has("IMHome")
+    assert router.calls[1].body == "oauth_token=a%2Bb%2Fc%3D"
+
+
+@pytest.mark.parametrize(
+    "router",
+    [
+        _hub(page="<p>no token</p>"),
+        _hub(submit_location=""),
+        _hub(callback=FakeResponse(200)),  # chain finishes without IMHome
+    ],
+    ids=["no-oauth-token", "no-callback-redirect", "no-imhome"],
+)
+async def test_the_hub_chain_fails_loudly(router) -> None:
+    with pytest.raises(TokenError):
+        await submit_oauth_token(
+            router, CookieJar(), "https://hub.infomentor.se/authentication/login"
         )
-        request = make_aiohttp_request(session)
-        token = await refresh_token(request, "r0")
-        self.assertEqual(token["refresh_token"], "r1")
-        self.assertEqual(token["access_token"], "a1")
-        posted = session.calls[0][2]
-        self.assertIn("grant_type=refresh_token", posted)
-        self.assertIn("refresh_token=r0", posted)
-        self.assertIn("client_secret=NONE", posted)
 
-    async def test_refresh_invalid_grant_is_revoked(self):
-        session = FakeSession([]).route(
-            "POST",
-            lambda u: u.endswith("/OAuth2/Token"),
-            lambda u, m: FakeResponse(200, '{"error":"invalid_grant"}',
-                                      headers={"Content-Type": "application/json"}),
-        )
-        request = make_aiohttp_request(session)
-        with self.assertRaises(TokenRevoked):
-            await refresh_token(request, "r0")
 
-    async def test_refresh_bad_request_is_blocked_not_revoked(self):
-        """Ett F5 "Bad Request" (HTML) får INTE tolkas som död token."""
-        session = FakeSession([]).route(
-            "POST",
-            lambda u: u.endswith("/OAuth2/Token"),
-            lambda u, m: FakeResponse(400, "<html>Bad Request</html>",
-                                       headers={"Content-Type": "text/html",
-                                                "Set-Cookie": "BIGipServer~INFOMENTOR~POOL=rd1; Path=/"}),
-        )
-        request = make_aiohttp_request(session)
-        with self.assertRaises(Blocked):
-            await refresh_token(request, "r0")
+# ---- the bridge: access token -> IMHome ----------------------------------------------------------
+HANDOFF = '"https://infomentor.se/Swedish/Production/mentor/?login=remote&id=0Ab12"'
 
-    async def test_make_aiohttp_request_disables_redirects(self):
-        """Bridge:n läser Location själv — aiohttp får inte följa redirects (#5)."""
-        session = FakeSession([]).route(
+
+def _bridge(*, sso=None, handoff_status=302):
+    sso = sso or FakeResponse(200, HANDOFF, headers=JSON)
+    return (
+        Router()
+        .add("GET", "/NA1/Authentication/sso", sso)
+        .add(
             "GET",
-            lambda u: True,
-            lambda u, m: FakeResponse(200, "ok"),
+            "/Swedish/Production/mentor/",
+            FakeResponse(
+                handoff_status,
+                location="https://hub.infomentor.se/authentication/login?forceOAuth=true",
+            ),
         )
-        request = make_aiohttp_request(session)
-        await request("GET", "https://example.com/x")
-        self.assertEqual(session.allow_redirects_calls, [False])
+        .add("GET", "authentication/login", FakeResponse(200, TOKEN_PAGE))
+        .add("POST", "/mentor/", FakeResponse(302, location="https://hub.infomentor.se/cb"))
+        .add("GET", "/cb", FakeResponse(200, set_cookies=[IMHOME]))
+    )
 
 
-# --------------------------------------------------------------- classify_token_response
-@unittest.skipUnless(AVAILABLE, "kräver aiohttp")
-class TestClassify(unittest.TestCase):
-    def test_alive(self):
-        v = classify_token_response(200, "application/json", '{"refresh_token":"r","access_token":"a"}')
-        self.assertEqual(v["verdict"], "ALIVE")
-
-    def test_revoked_json_error(self):
-        v = classify_token_response(200, "application/json", '{"error":"revoked"}')
-        self.assertEqual(v["verdict"], "REVOKED")
-
-    def test_blocked_html_bad_request(self):
-        v = classify_token_response(400, "text/html", "Bad Request")
-        self.assertEqual(v["verdict"], "BLOCKED")
-
-    def test_blocked_empty_body(self):
-        v = classify_token_response(200, "text/plain", "")
-        self.assertEqual(v["verdict"], "BLOCKED")
-
-    def test_unknown_unparseable_json(self):
-        v = classify_token_response(200, "application/json", "{not json")
-        self.assertEqual(v["verdict"], "UNKNOWN")
-
-    def test_non_200_json_error_is_revoked(self):
-        """Ett JSON OAuth-fel med status >= 400 ärREVOKED — annars faller detta test."""
-        v = classify_token_response(400, "application/json", '{"error":"invalid_grant"}')
-        self.assertEqual(v["verdict"], "REVOKED")
-
-    def test_json_with_charset_is_recognized(self):
-        """`application/json; charset=utf-8` är JSON — annars faller detta test (#4)."""
-        v = classify_token_response(
-            200, "application/json; charset=utf-8", '{"refresh_token":"r","access_token":"a"}'
-        )
-        self.assertEqual(v["verdict"], "ALIVE")
-
-    def test_json_with_charset_error_is_revoked(self):
-        """OAuth-fel med charset-bärda content-type är REVOKED, inte BLOCKED (#4)."""
-        v = classify_token_response(
-            400, "application/json; charset=utf-8", '{"error":"invalid_grant"}'
-        )
-        self.assertEqual(v["verdict"], "REVOKED")
+async def test_the_bridge_carries_the_bearer_on_every_hop_and_ends_with_imhome() -> None:
+    router = _bridge()
+    jar = await bridge_web_session(router, "ACCESS")
+    assert jar.has("IMHome")
+    assert all(call.headers.get("Authorization") == "Bearer ACCESS" for call in router.calls)
 
 
-# --------------------------------------------------------------- bridge_web_session
-@unittest.skipUnless(AVAILABLE, "kräver aiohttp")
-class TestBridge(unittest.IsolatedAsyncioTestCase):
-    async def test_full_chain_sets_imhome(self):
-        fetch = MockFetch(good_responses())
-        jar = await bridge_web_session(fetch, "access-1")
-        self.assertTrue(jar.has("IMHome"))
-        self.assertTrue(jar.has(".ASPXAUTH"))
-
-    async def test_bearer_carried_on_native_hop(self):
-        fetch = MockFetch(good_responses())
-        await bridge_web_session(fetch, "access-1")
-        # Hopp 1 (native sso) får ha Bearer; .ASPXAUTH sätts inte förrän hopp 2.
-        self.assertIn("Bearer access-1", str(fetch.headers_per_call[0]))
-
-    async def test_lost_trailing_slash_is_blocked_handoff(self):
-        """Hopp 2 svarar 200 utan Location — exakt vad en förlorad trailing slash gör."""
-        handoff_path = MENTOR + "/Swedish/Production/mentor/"
-        responses = good_responses()
-        responses[handoff_path] = FakeResponse(200, "<html>a different page</html>",
-                                              headers={"Content-Type": "text/html"})
-        fetch = MockFetch(responses)
-        with self.assertRaises(TokenError):
-            await bridge_web_session(fetch, "access-1")
-
-    async def test_request_token_without_oauth_token(self):
-        responses = good_responses()
-        responses[REQUEST_TOKEN_URL] = FakeResponse(200, "<html><form action='x'></form></html>",
-                                                    headers={"Content-Type": "text/html"})
-        fetch = MockFetch(responses)
-        with self.assertRaises(TokenError):
-            await bridge_web_session(fetch, "access-1")
-
-    async def test_no_callback_redirect(self):
-        responses = good_responses()
-        responses[SUBMIT_URL] = FakeResponse(200, "<html>no callback</html>",
-                                             headers={"Content-Type": "text/html"})
-        fetch = MockFetch(responses)
-        with self.assertRaises(TokenError):
-            await bridge_web_session(fetch, "access-1")
-
-    async def test_no_imhome_at_end(self):
-        responses = good_responses()
-        responses[CALLBACK_URL] = FakeResponse(302, "", headers={"Location": "/#/"})
-        fetch = MockFetch(responses)
-        with self.assertRaises(TokenError):
-            await bridge_web_session(fetch, "access-1")
-
-    async def test_empty_access_token_never_touches_network(self):
-        fetch = MockFetch(good_responses())
-        with self.assertRaises(TokenError):
-            await bridge_web_session(fetch, "")
-        self.assertEqual(fetch.calls, [])
+@pytest.mark.parametrize(
+    "router",
+    [
+        _bridge(sso=FakeResponse(401)),
+        _bridge(sso=FakeResponse(200, '"https://infomentor.se/other/"', headers=JSON)),
+        _bridge(handoff_status=200),  # the trailing slash was lost: answers 200, not 302
+    ],
+    ids=["token-rejected", "not-the-mentor-handoff", "lost-trailing-slash"],
+)
+async def test_the_bridge_names_the_hop_that_failed(router) -> None:
+    with pytest.raises(TokenError):
+        await bridge_web_session(router, "ACCESS")
 
 
-# --------------------------------------------------------------- CookieJar
-@unittest.skipUnless(AVAILABLE, "kräver aiohttp")
-class TestCookieJar(unittest.TestCase):
-    def test_domain_matching_and_header(self):
-        jar = CookieJar()
-        jar.set_from_header("IMHome=abc; Path=/; HttpOnly", f"{IM_HUB}/x")
-        header = jar.cookie_header(f"{IM_HUB}/some/path")
-        self.assertIn("IMHome=abc", header)
-        # Andra domäner får inte cookie:t.
-        self.assertNotIn("IMHome", jar.cookie_header("https://evil.example.com/"))
-
-    def test_header_matching(self):
-        jar = CookieJar()
-        jar.set_from_header("IMHome=abc; Domain=.infomentor.se; Path=/; HttpOnly", f"{IM_HUB}/x")
-        self.assertIn("IMHome=abc", jar.cookie_header("https://hub.infomentor.se/x"))
-        self.assertIn("IMHome=abc", jar.cookie_header("https://infomentor.se/x"))
-
-
-if __name__ == "__main__":
-    unittest.main()
+async def test_an_empty_access_token_never_touches_the_network() -> None:
+    router = Router()
+    with pytest.raises(TokenError):
+        await bridge_web_session(router, "")
+    assert router.calls == []
