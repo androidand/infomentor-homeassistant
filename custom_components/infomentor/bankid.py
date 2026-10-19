@@ -67,7 +67,6 @@ class BankIDStep:
 
     message: str
     qr_data: str | None = None
-    autostart_url: str | None = None
     autostart_token: str | None = None
     state: str = "PENDING"
     action: str = "bankid"  # progress_action
@@ -152,7 +151,6 @@ class BankIDDriver:
         jar = CookieJar()
         auth_url = await self._open(do_request, jar, idp)
         order, token, qr_data = await self._initialize(do_request, jar, auth_url)
-        autostart = f"bankid:///?autostarttoken={token}&redirect=null"
 
         deadline = time.monotonic() + timeout
         restarts = 0
@@ -169,7 +167,6 @@ class BankIDDriver:
                         BankIDStep(
                             "Skanna QR-koden i BankID-appen",
                             qr_data=qr_data,
-                            autostart_url=autostart,
                             autostart_token=token,
                             state=state,
                         )
@@ -201,7 +198,6 @@ class BankIDDriver:
                     "BankID-ordern gick ut oskannad, startar en ny (%d/%d)", restarts, max_restarts
                 )
                 order, token, qr_data = await self._initialize(do_request, jar, auth_url)
-                autostart = f"bankid:///?autostarttoken={token}&redirect=null"
                 state = "PENDING"
                 continue
             if state == "OK":

@@ -105,12 +105,12 @@ async def test_login_walks_the_chain_and_returns_the_assertion() -> None:
     chain, steps = Chain(["PENDING", "USER_SIGN", "OK"]), []
 
     async def progress(step):
-        steps.append((step.state, step.qr_data, step.autostart_url))
+        steps.append((step.state, step.qr_data, step.autostart_token))
 
     result = await driver().run(chain, progress=progress)
 
     assert result.saml_response == "ENCODED-ASSERT"
-    assert steps[0] == ("PENDING", "qr1.0", "bankid:///?autostarttoken=tok1&redirect=null")
+    assert steps[0] == ("PENDING", "qr1.0", "tok1")
     assert "USER_SIGN" in [state for state, *_ in steps]
     assert steps[-1][0] == "OK"
 
