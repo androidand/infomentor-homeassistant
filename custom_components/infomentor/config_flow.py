@@ -300,7 +300,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user_token", data_schema=STEP_TOKEN_SCHEMA, errors=errors
         )
 
-    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
+    async def async_step_reauth(self, _entry_data: dict[str, Any]) -> ConfigFlowResult:
         """Starta om-auth när uppgifterna slutat gälla."""
         return await self.async_step_reauth_confirm()
 
