@@ -1,0 +1,6 @@
+- [ ] 1.1 Fixture: a news feed with weekly letters (titles and dates only, invented text)
+- [ ] 1.2 Test first: learn-log not permitted + a "Veckobrev" news item gives the sensor a state
+- [ ] 1.3 Implement the fallback in the coordinator/sensor; keep the learning log path as is
+- [ ] 1.4 Test: neither source gives no sensor
+- [ ] 2.1 Survey Förskoleklass: which endpoints are permitted, which sensors are useful
+- [ ] 3.1 Live check in the real HA, then release
