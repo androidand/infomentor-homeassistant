@@ -6,9 +6,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A first-class Home Assistant integration for **InfoMentor** (the Swedish school
-platform, "Mentor" / "InfoMentor Hub"). It signs in with your normal
-email/password account and turns your children's school day into sensors you can
-build automations on.
+platform, "Mentor" / "InfoMentor Hub"). It signs in with BankID or
+email/password and turns your children's school day into sensors you can build
+automations on.
 
 > ⚠️ **Unofficial and not affiliated with InfoMentor.** For personal use with
 > your own account. The API is undocumented and can change without warning —
@@ -54,12 +54,16 @@ folder and restart.
 
 ## Configuration
 
-Enter the **email and password** of your InfoMentor (Mentor) account. The
-integration signs in, discovers every child on the account, and creates the
-entities above.
+Sign in one of two ways:
 
-> Some municipalities use BankID/SSO instead of the email/password account. This
-> integration uses the email/password flow; it depends on your school.
+- **BankID (Stockholm Stad only)** — scan a QR code with the BankID app, or tap
+  the link on the phone that has it.
+- **Email and password** — for municipalities that still use the classic
+  account.
+
+With BankID the integration stores a rotating refresh token (not a password) and refreshes it every run,
+then discovers every child on the account and creates the entities above.
+Sensitive fields are redacted in the diagnostics file.
 
 ### Options
 
@@ -104,10 +108,16 @@ entities:
 ## How it works
 
 The integration talks directly to `hub.infomentor.se` using `aiohttp` (bundled
-with Home Assistant — no extra dependencies). Login follows the documented
-email/password flow (`oauth_token` → mentor login form → credentials →
-`isauthenticated`) and the session lives in cookies. Each poll logs in again, so
-an expired session never matters.
+with Home Assistant — no extra dependencies).
+
+With **BankID**, each run refreshes the token (it rotates on every use and
+is written back before it is used), bridges to the hub, and fetches the data. A
+`REVOKED` token triggers re-authentication; a blocked or down endpoint retries
+without re-authenticating, so a flaky front-end never logs you out.
+
+With **email and password**, login follows the documented flow (`oauth_token` →
+mentor login form → credentials → `isauthenticated`) and the session lives in
+cookies. Each poll logs in again, so an expired session never matters.
 
 All the endpoints were mapped and documented by the companion project
 **[infomentor-api](https://github.com/c14ym0re/infomentor-api)** (CLI, email
@@ -118,8 +128,9 @@ face of it.
 
 - **"Invalid email or password"** – check the credentials at
   <https://infomentor.se/swedish/production/mentor/>; some municipalities use SSO.
-- **Re-authentication prompt** – the session was rejected; Home Assistant asks
-  for the password again (nothing is logged out permanently).
+- **Re-authentication prompt** – the stored credential was rejected. With BankID
+  Home Assistant asks you to scan a new QR code; in password mode it asks for
+  the password again (nothing is logged out permanently).
 - **No entities** – make sure the account actually has children with an active
   placement.
 
