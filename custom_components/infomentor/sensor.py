@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date
 from typing import Any
 
@@ -22,6 +23,7 @@ from .util import (
     tasks_overdue,
     upcoming_assignments,
     upcoming_event,
+    weekly_letter_entries,
 )
 
 
@@ -161,10 +163,11 @@ class NextEventSensor(_PupilSensor):
 
 
 class LearnlogSensor(_PupilSensor):
-    """Lärloggen — veckobrev och annat läraren publicerar.
+    """Veckobrevet — från lärloggen, annars från nyheterna.
 
-    State är den senaste postens rubrik; hela listan (rubrik, ämne, datum och
-    text) ligger som attribut så den går att visa i en dashboard eller skicka.
+    State är rubriken på det senaste brevet. Skolor lägger veckobrevet antingen i
+    lärloggen eller som en nyhet; `source` säger vilket. Hela listan (rubrik, ämne,
+    datum, text och bilagor) ligger som attribut så den går att visa eller skicka.
     """
 
     _attr_translation_key = "learnlog"
@@ -173,20 +176,25 @@ class LearnlogSensor(_PupilSensor):
     def __init__(self, coordinator, entry, pupil) -> None:
         super().__init__(coordinator, entry, pupil, "learnlog")
 
+    def _letters(self) -> tuple[list[Mapping[str, Any]], str | None]:
+        pupil, data = self.pupil, self.coordinator.data
+        return weekly_letter_entries(
+            pupil.learnlog if pupil else [], data.weekly_letter if data else None
+        )
+
     @property
     def native_value(self) -> str | None:
-        pupil = self.pupil
-        if pupil is None or not pupil.learnlog:
-            return None
-        return pupil.learnlog[0]["title"] or None
+        entries, _ = self._letters()
+        return entries[0]["title"] or None if entries else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        pupil = self.pupil
-        if pupil is None:
+        if self.pupil is None:
             return {}
+        entries, source = self._letters()
         return {
-            "count": len(pupil.learnlog),
+            "count": len(entries),
+            "source": source,
             "entries": [
                 {
                     "title": e["title"],
@@ -194,8 +202,9 @@ class LearnlogSensor(_PupilSensor):
                     "modified": e["modified"],
                     "text": e["text"],
                     "attachments": e["attachments"],
+                    "attachment_urls": e.get("attachment_urls", []),
                 }
-                for e in pupil.learnlog[:5]
+                for e in entries[:5]
             ],
         }
 

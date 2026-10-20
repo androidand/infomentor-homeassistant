@@ -21,6 +21,7 @@ from .const import (
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL_MIN,
     DOMAIN,
+    HUB_BASE,
     clamp_interval,
 )
 from .util import (
@@ -39,6 +40,7 @@ from .util import (
     parse_mateo_days,
     parse_mateo_unit,
     plan_with_detail,
+    weekly_letter_from_news,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -71,6 +73,7 @@ class InfomentorData:
     pupils: list[PupilData] = field(default_factory=list)
     notifications: list[dict[str, Any]] = field(default_factory=list)
     news: list[dict[str, Any]] = field(default_factory=list)
+    weekly_letter: dict[str, Any] | None = None
     lunch: dict[str, list[dict[str, str]]] = field(default_factory=dict)
     lunch_unit: str | None = None
 
@@ -203,9 +206,9 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
             "notiser", self.api.async_notifications(), [], strict=strict
         )
         data.notifications = normalize_notifications(notifications, child_by_id)
-        data.news = normalize_news(
-            await self._safe("nyheter", self.api.async_news(), [], strict=strict)
-        )
+        news = await self._safe("nyheter", self.api.async_news(), [], strict=strict)
+        data.news = normalize_news(news)
+        data.weekly_letter = weekly_letter_from_news(news, HUB_BASE)
 
         # Icke-strikt läge (efter en ny inloggning): om INGET anrop gick igenom
         # är sessionen ändå död — säg till i stället för att visa tom data.
