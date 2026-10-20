@@ -73,6 +73,9 @@
       },
       "news": {
         "name": "School news"
+      },
+      "fritids": {
+        "name": "Leisure-time centre today"
       }
     },
     "binary_sensor": {
@@ -83,6 +86,9 @@
     "calendar": {
       "calendar": {
         "name": "Calendar"
+      },
+      "fritids_calendar": {
+        "name": "Leisure-time centre"
       }
     }
   }

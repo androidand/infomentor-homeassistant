@@ -12,7 +12,7 @@ from homeassistant.util import dt as dt_util
 
 from .coordinator import InfomentorCoordinator, PupilData
 from .entity import InfomentorPupilEntity
-from .util import calendar_span
+from .util import calendar_span, fritids_calendar_entries
 
 
 async def async_setup_entry(
@@ -20,7 +20,12 @@ async def async_setup_entry(
 ) -> None:
     coordinator: InfomentorCoordinator = entry.runtime_data.coordinator
     pupils = coordinator.data.pupils if coordinator.data else []
-    async_add_entities(PupilCalendar(coordinator, entry, pupil) for pupil in pupils)
+    entities: list[PupilCalendar] = []
+    for pupil in pupils:
+        entities.append(PupilCalendar(coordinator, entry, pupil))
+        if pupil.fritids:
+            entities.append(FritidsCalendar(coordinator, entry, pupil))
+    async_add_entities(entities)
 
 
 def _localized(value: datetime | object) -> datetime | object:
@@ -36,14 +41,21 @@ class PupilCalendar(InfomentorPupilEntity, CalendarEntity):
     _attr_translation_key = "calendar"
 
     def __init__(
-        self, coordinator: InfomentorCoordinator, entry: ConfigEntry, pupil: PupilData
+        self,
+        coordinator: InfomentorCoordinator,
+        entry: ConfigEntry,
+        pupil: PupilData,
+        key: str = "calendar",
     ) -> None:
-        super().__init__(coordinator, entry, pupil, "calendar")
+        super().__init__(coordinator, entry, pupil, key)
+
+    def _entries(self) -> list[dict]:
+        pupil = self.pupil
+        return pupil.calendar if pupil else []
 
     def _events(self) -> list[CalendarEvent]:
-        pupil = self.pupil
         events = []
-        for entry in pupil.calendar if pupil else []:
+        for entry in self._entries():
             span = calendar_span(entry)
             if span is None:
                 continue
@@ -71,3 +83,21 @@ class PupilCalendar(InfomentorPupilEntity, CalendarEntity):
             for e in self._events()
             if e.start_datetime_local < end_date and e.end_datetime_local > start_date
         ]
+
+
+class FritidsCalendar(PupilCalendar):
+    """Fritidsschemat: tider för lämning och hämtning, ledighet och stängda dagar.
+
+    Hubben visar bara veckan som är aktuell, så kalendern har den veckans dagar.
+    """
+
+    _attr_translation_key = "fritids_calendar"
+
+    def __init__(
+        self, coordinator: InfomentorCoordinator, entry: ConfigEntry, pupil: PupilData
+    ) -> None:
+        super().__init__(coordinator, entry, pupil, "fritids_calendar")
+
+    def _entries(self) -> list[dict]:
+        pupil = self.pupil
+        return fritids_calendar_entries(pupil.fritids) if pupil else []

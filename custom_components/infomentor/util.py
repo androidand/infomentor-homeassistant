@@ -241,6 +241,59 @@ def calendar_span(entry: Mapping[str, Any]) -> tuple[date | datetime, date | dat
     return start, end
 
 
+def normalize_fritids(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """TimeRegistration/GetTimeRegistrations -> fritidsdagar (veckan som hubben visar)."""
+    out: list[dict[str, Any]] = []
+    for day in raw.get("days") or []:
+        if not isinstance(day, Mapping):
+            continue
+        out.append(
+            {
+                "date": day_of(day.get("date")),
+                "start": time_of(day.get("startDateTime")),
+                "end": time_of(day.get("endDateTime")),
+                "on_leave": bool(day.get("onLeave")),
+                "closed": bool(day.get("isSchoolClosed")),
+                "closed_reason": str(day.get("schoolClosedReason") or ""),
+            }
+        )
+    return out
+
+
+def fritids_calendar_entries(days: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Fritidsdagar som kalenderposter: tiderna, ledighet och stängda dagar."""
+    out: list[dict[str, Any]] = []
+    for day in days:
+        whole_day = {"start": f"{day['date']}T00:00:00", "end": f"{day['date']}T23:59:59"}
+        if day["on_leave"]:
+            title, span, all_day = "Ledig från fritids", whole_day, True
+        elif day["closed"]:
+            reason = day["closed_reason"]
+            title, span, all_day = (f"Stängt: {reason}" if reason else "Stängt"), whole_day, True
+        elif day["start"] and day["end"]:
+            span = {
+                "start": f"{day['date']}T{day['start']}:00",
+                "end": f"{day['date']}T{day['end']}:00",
+            }
+            title, all_day = "Fritids", False
+        else:
+            continue
+        out.append(
+            {"id": f"fritids-{day['date']}", "title": title, "subjects": "", "all_day": all_day}
+            | span
+        )
+    return out
+
+
+def fritids_today(days: Iterable[Mapping[str, Any]], today: date) -> str | None:
+    """Dagens fritidstider som '08:00–17:00', eller None (ledig, stängt eller ingen post)."""
+    key = today.isoformat()
+    for day in days:
+        if day["date"] == key and not day["on_leave"] and not day["closed"]:
+            return f"{day['start']}–{day['end']}" if day["start"] and day["end"] else None
+    return None
+
+
 def normalize_tasks(raw: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """task/GetTasks -> uppgifter."""
     out: list[dict[str, Any]] = []

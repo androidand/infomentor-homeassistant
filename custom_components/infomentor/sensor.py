@@ -14,6 +14,7 @@ from homeassistant.util import dt as dt_util
 from .coordinator import InfomentorCoordinator, PupilData
 from .entity import InfomentorHubEntity, InfomentorPupilEntity
 from .util import (
+    fritids_today,
     lessons_on,
     lunch_for,
     next_school_day,
@@ -40,6 +41,8 @@ async def async_setup_entry(
             entities.append(AssignmentsSensor(coordinator, entry, pupil))
             entities.append(NextEventSensor(coordinator, entry, pupil))
             entities.append(LearnlogSensor(coordinator, entry, pupil))
+            if pupil.fritids:
+                entities.append(FritidsSensor(coordinator, entry, pupil))
             entities.append(PlansSensor(coordinator, entry, pupil))
         entities.append(NewsSensor(coordinator, entry))
         if data.lunch_unit:
@@ -198,6 +201,26 @@ class LearnlogSensor(_PupilSensor):
                 for e in pupil.learnlog[:5]
             ],
         }
+
+
+class FritidsSensor(_PupilSensor):
+    """Dagens fritidstider, t.ex. 08:00–17:00. Veckans dagar ligger som attribut."""
+
+    _attr_translation_key = "fritids"
+    _attr_icon = "mdi:human-child"
+
+    def __init__(self, coordinator, entry, pupil) -> None:
+        super().__init__(coordinator, entry, pupil, "fritids")
+
+    @property
+    def native_value(self) -> str | None:
+        pupil = self.pupil
+        return fritids_today(pupil.fritids, dt_util.now().date()) if pupil else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        pupil = self.pupil
+        return {"days": pupil.fritids} if pupil else {}
 
 
 class PlansSensor(_PupilSensor):

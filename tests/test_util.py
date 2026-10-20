@@ -250,6 +250,48 @@ class TestLearnlogAndNews(unittest.TestCase):
         self.assertEqual(util.calendar_span(broken)[1], datetime(2026, 10, 23, 10, 0))
         self.assertIsNone(util.calendar_span({"start": "", "end": "", "all_day": False}))
 
+    def test_fritids_days_are_normalised_and_turned_into_calendar_entries(self):
+        raw = {
+            "startDate": "2026-10-19T00:00:00",
+            "days": [
+                {"date": "2026-10-19T00:00:00", "startDateTime": "2026-10-19T08:00:00",
+                 "endDateTime": "2026-10-19T13:15:00", "onLeave": False,
+                 "isSchoolClosed": False, "schoolClosedReason": ""},
+                {"date": "2026-10-20T00:00:00", "startDateTime": None, "endDateTime": None,
+                 "onLeave": True, "isSchoolClosed": False, "schoolClosedReason": ""},
+                {"date": "2026-10-21T00:00:00", "startDateTime": None, "endDateTime": None,
+                 "onLeave": False, "isSchoolClosed": True, "schoolClosedReason": "Studiedag"},
+                {"date": "2026-10-22T00:00:00", "startDateTime": None, "endDateTime": None,
+                 "onLeave": False, "isSchoolClosed": False, "schoolClosedReason": ""},
+            ],
+        }
+        days = util.normalize_fritids(raw)
+        self.assertEqual(
+            [(d["date"], d["start"], d["end"]) for d in days],
+            [("2026-10-19", "08:00", "13:15"), ("2026-10-20", "", ""),
+             ("2026-10-21", "", ""), ("2026-10-22", "", "")],
+        )
+        entries = util.fritids_calendar_entries(days)
+        self.assertEqual(
+            [(e["title"], e["all_day"]) for e in entries],
+            [("Fritids", False), ("Ledig från fritids", True), ("Stängt: Studiedag", True)],
+        )
+        self.assertEqual(entries[0]["start"], "2026-10-19T08:00:00")
+        self.assertEqual(util.normalize_fritids({}), [])
+
+    def test_fritids_today_is_the_times_or_none(self):
+        days = [
+            {"date": "2026-10-19", "start": "08:00", "end": "13:15", "on_leave": False,
+             "closed": False},
+            {"date": "2026-10-20", "start": "08:00", "end": "17:00", "on_leave": True,
+             "closed": False},
+            {"date": "2026-10-21", "start": "", "end": "", "on_leave": False, "closed": True},
+        ]
+        self.assertEqual(util.fritids_today(days, date(2026, 10, 19)), "08:00–13:15")
+        self.assertIsNone(util.fritids_today(days, date(2026, 10, 20)))  # ledig
+        self.assertIsNone(util.fritids_today(days, date(2026, 10, 21)))  # stängt
+        self.assertIsNone(util.fritids_today(days, date(2026, 10, 25)))  # ingen post
+
     def test_normalize_news_sorts_and_limits(self):
         raw = [
             {"id": 1, "title": "Äldre", "publishedDate": "2026-09-01"},

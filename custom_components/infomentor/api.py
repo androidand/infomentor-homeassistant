@@ -251,6 +251,11 @@ class InfomentorApi:
         data = await self._post_hub("/attendance/attendance/appData", {})
         return data if isinstance(data, dict) else {}
 
+    async def async_fritids(self, pupil: MappingLike) -> dict[str, Any]:
+        """Fritidsschemat (tider för lämning och hämtning) för veckan som visas."""
+        data = await self._post_hub("/TimeRegistration/TimeRegistration/GetTimeRegistrations/", {})
+        return data if isinstance(data, dict) else {}
+
     async def async_learnlog(self, pupil: MappingLike) -> dict[str, Any]:
         """Lärloggen (veckobrev m.m.) för valt barn."""
         data = await self._post_hub("/learnlog/learnlog/appData", {})

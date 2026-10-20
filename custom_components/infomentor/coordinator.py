@@ -28,6 +28,7 @@ from .util import (
     display_name,
     normalize_attendance,
     normalize_calendar,
+    normalize_fritids,
     normalize_learnlog,
     normalize_lessons,
     normalize_news,
@@ -58,6 +59,7 @@ class PupilData:
     display_name: str
     lessons: list[dict[str, Any]] = field(default_factory=list)
     calendar: list[dict[str, Any]] = field(default_factory=list)
+    fritids: list[dict[str, Any]] = field(default_factory=list)
     tasks: list[dict[str, Any]] = field(default_factory=list)
     attendance: dict[str, Any] = field(default_factory=dict)
     learnlog: list[dict[str, Any]] = field(default_factory=list)
@@ -162,6 +164,16 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
                     f"kalender ({who})", self.api.async_calendar(pupil), [], strict=strict
                 )
             )
+            # Inte alla barn har fritids; ett avvisat anrop är då normalt och ska vara tyst.
+            fritids = normalize_fritids(
+                await self._safe(
+                    f"fritids ({who})",
+                    self.api.async_fritids(pupil),
+                    {},
+                    strict=strict,
+                    quiet=True,
+                )
+            )
             tasks = normalize_tasks(
                 await self._safe(
                     f"uppgifter ({who})", self.api.async_tasks(pupil), [], strict=strict
@@ -192,6 +204,7 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
                     display_name=who,
                     lessons=lessons,
                     calendar=calendar,
+                    fritids=fritids,
                     tasks=tasks,
                     attendance=attendance,
                     learnlog=learnlog,
@@ -276,7 +289,9 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
         for plan_id in [key for key in self._plan_details if key not in self._plan_ids_seen]:
             del self._plan_details[plan_id]
 
-    async def _safe(self, label: str, awaitable, default, *, strict: bool = True):
+    async def _safe(
+        self, label: str, awaitable, default, *, strict: bool = True, quiet: bool = False
+    ):
         """Hämtar en endpoint; loggar och hoppar över vid endpoint-fel.
 
         I strikt läge (första försöket) bubblar InvalidAuth upp så vi kan logga in
@@ -289,13 +304,26 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
         except CannotConnect:
             raise
         except InvalidAuth as err:
-            if strict:
+            # En tyst hämtning gäller något barnet kanske inte har (fritids); en död session
+            # märks på de övriga anropen, så den ska aldrig tvinga fram en ny inloggning.
+            if strict and not quiet:
                 raise
-            _LOGGER.warning("InfoMentor: %s avvisades (%s) – hoppar över", label, err)
-            self._auth_skips += 1
+            _LOGGER.log(
+                logging.DEBUG if quiet else logging.WARNING,
+                "InfoMentor: %s avvisades (%s) – hoppar över",
+                label,
+                err,
+            )
+            if not quiet:
+                self._auth_skips += 1
             return default
         except (ApiError, InfomentorError) as err:
-            _LOGGER.warning("InfoMentor: kunde inte hämta %s – hoppar över (%s)", label, err)
+            _LOGGER.log(
+                logging.DEBUG if quiet else logging.WARNING,
+                "InfoMentor: kunde inte hämta %s – hoppar över (%s)",
+                label,
+                err,
+            )
             return default
         self._ok_calls += 1
         return value
