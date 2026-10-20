@@ -11,7 +11,6 @@ deras skull.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -20,24 +19,36 @@ from typing import Any
 from urllib.parse import urljoin
 
 from .bankid import (
+    APPROVED,
+    CANCELLED,
+    EXPIRED,
+    MAX_POLL_SECONDS,
+    MAX_RESTARTS,
+    PENDING,
+    POLL_INTERVAL_SECONDS,
+    SCANNED,
     SSO_BASE,
-    BankIDDenied,
     BankIDError,
     BankIDPageChanged,
     BankIDResult,
-    BankIDStep,
-    BankIDTimeout,
     saml_result,
+    wait_for_approval,
 )
 from .const import IDP_STOCKHOLM_PAR, SSO_LOGIN_PATH
 from .web import CookieJar, DoRequest, fetch, follow, host_and_path
 
 _LOGGER = logging.getLogger(__name__)
 
-MAX_POLL_SECONDS = 180.0
-POLL_INTERVAL_SECONDS = 1.0  # QR-koden byter varje sekund; en äldre bild hinner inte skannas
-MAX_RESTARTS = 3  # en oskannad QR-order dör efter ca 30 s
-WAITING_STATES = frozenset({"PENDING", "STARTED", "USER_SIGN"})
+# PhenixIDs states, mapped to the ones `wait_for_approval` understands. ERROR is what an
+# order that nobody scanned turns into after ca 30 s.
+_STATUS = {
+    "PENDING": PENDING,
+    "STARTED": SCANNED,
+    "USER_SIGN": SCANNED,
+    "OK": APPROVED,
+    "CANCELLED": CANCELLED,
+    "ERROR": EXPIRED,
+}
 BANKID_LINK_RE = re.compile(
     r"href=[\"']([^\"']*/NECSadc/mbid/b64startpage\.jsp\?startpage=[^\"']*)[\"']", re.IGNORECASE
 )
@@ -116,65 +127,28 @@ class StockholmDriver:
         """Kör kedjan till SAMLResponse. Kastar BankIDDenied/-Timeout/-PageChanged/-Error."""
         jar = CookieJar()
         auth_url = await self._open(do_request, jar)
-        order, token, qr_data = await self._initialize(do_request, jar, auth_url)
+        async def start() -> tuple[str, str, str]:
+            return await self._initialize(do_request, jar, auth_url)
 
-        deadline = time.monotonic() + timeout
-        restarts = 0
-        scanned = False
-        state = "PENDING"
-        last = ""
-        last_logged = ""
-        while True:
-            key = f"{state}|{qr_data}"
-            if key != last and state in WAITING_STATES:
-                last = key
-                if progress:
-                    await progress(
-                        BankIDStep(
-                            "Skanna QR-koden i BankID-appen",
-                            qr_data=qr_data,
-                            autostart_token=token,
-                            state=state,
-                        )
-                    )
-            if time.monotonic() > deadline:
-                raise BankIDTimeout(f"Tiden gick ut efter {int(timeout)} s utan godkännande")
-            await asyncio.sleep(self._poll_interval)
+        async def poll(order: str) -> tuple[str, str | None]:
             answer = await self._get_json(
                 do_request, jar, auth_url, f"verifyorder={order}", "verifyorder"
             )
             state = answer.get("state")
             if not isinstance(state, str):
                 raise BankIDPageChanged("verifyorder gav inget state")
-            qr_data = answer.get("qrData") or qr_data
-            if state not in ("PENDING", "ERROR"):
-                scanned = True
-            if state != last_logged:
-                _LOGGER.debug("BankID-order %s: %s", order[:8], state)
-                last_logged = state
-            if state == "ERROR" and not scanned:
-                # En oskannad QR-order dör efter ca 30 s med ERROR: starta en ny. Är alla
-                # ordrar oskannade är det en tidsgräns, inte ett sidfel.
-                if restarts >= max_restarts:
-                    raise BankIDTimeout(
-                        f"ingen skannade QR-koden i {restarts + 1} order (var och en ca 30 s)"
-                    )
-                restarts += 1
-                _LOGGER.debug(
-                    "BankID-ordern gick ut oskannad, startar en ny (%d/%d)", restarts, max_restarts
-                )
-                order, token, qr_data = await self._initialize(do_request, jar, auth_url)
-                state = "PENDING"
-                continue
-            if state == "OK":
-                break
-            if state == "CANCELLED":
-                raise BankIDDenied("BankID-appen avbröt inloggningen")
-            if state not in WAITING_STATES:
+            if state not in _STATUS:
                 raise BankIDError(f"BankID slutade i läget {state}")
+            return _STATUS[state], answer.get("qrData")
 
-        if progress:
-            await progress(BankIDStep("Godkänt — slutför inloggning…", state="OK"))
+        await wait_for_approval(
+            start,
+            poll,
+            progress=progress,
+            poll_interval=self._poll_interval,
+            timeout=timeout,
+            max_restarts=max_restarts,
+        )
         return await self._collect_assertion(do_request, jar, auth_url)
 
     async def _collect_assertion(

@@ -84,8 +84,11 @@ works everywhere. To add yours:
    QR code is fetched, how the order is polled, and where the SAML response is posted
    back to `sso.infomentor.se`). Keep tokens and cookie values out of anything you share.
 2. Add a module like `bankid_stockholm.py` with a class that has a `NAME` and
-   `async run(do_request, *, progress)`, calls `progress(BankIDStep(...))` while the user
-   scans, and ends with `saml_result(page, jar)`.
+   `async run(do_request, *, progress)`. It opens the provider's pages, then hands the
+   waiting to `wait_for_approval(start, poll, ...)` (timeout, restarts of unscanned QR
+   codes and progress reporting are shared), and ends with `saml_result(page, jar)`.
+   Your `start` creates an order and your `poll` maps the provider's states to
+   `PENDING`/`SCANNED`/`APPROVED`/`CANCELLED`/`EXPIRED`.
 3. Register it in `DRIVERS` in `api.py`, keyed by the `idp` value from
    `https://sso.infomentor.se/login.ashx?idp=<value>`. It then appears in the
    municipality list when you add the integration.
