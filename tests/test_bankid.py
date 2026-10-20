@@ -13,12 +13,12 @@ import pytest
 
 from custom_components.infomentor.bankid import (
     BankIDDenied,
-    BankIDDriver,
     BankIDError,
     BankIDPageChanged,
     BankIDTimeout,
     post_saml_response,
 )
+from custom_components.infomentor.bankid_stockholm import StockholmDriver
 from tests.fakes import Call, FakeResponse, Router
 
 START = "https://sso.infomentor.se/login.ashx?idp=stockholm_par"
@@ -97,8 +97,8 @@ class Chain(Router):
         return [c for c in self.calls if "verifyorder=" in c.url]
 
 
-def driver() -> BankIDDriver:
-    return BankIDDriver(poll_interval=0)
+def driver() -> StockholmDriver:
+    return StockholmDriver(poll_interval=0)
 
 
 async def test_login_walks_the_chain_and_returns_the_assertion() -> None:
@@ -251,7 +251,9 @@ async def test_the_whole_login_ends_with_imhome_and_the_session_cookie_reaches_t
     )
 
     result = await driver().run(chain)
-    jar = await post_saml_response(hub, saml_response="a+b/c=", jar=result.jar)
+    jar = await post_saml_response(
+        hub, saml_response="a+b/c=", jar=result.jar, idp="stockholm_par"
+    )
 
     saml_post = hub.calls[0]
     assert jar.has("IMHome")
