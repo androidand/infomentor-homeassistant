@@ -11,8 +11,10 @@ pytest.importorskip("homeassistant")
 
 from homeassistant import config_entries, data_entry_flow  # noqa: E402
 from homeassistant.core import HomeAssistant  # noqa: E402
+from pytest_homeassistant_custom_component.common import MockConfigEntry  # noqa: E402
 
 from custom_components.infomentor.api import (  # noqa: E402
+    DRIVERS,
     CannotConnect,
     InvalidAuth,
 )
@@ -154,11 +156,17 @@ async def _finish_bankid(hass: HomeAssistant, flow_id: str):
         return None
 
 
-async def _start_bankid(hass: HomeAssistant):
+async def _start_municipality_step(hass: HomeAssistant):
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
     return await hass.config_entries.flow.async_configure(result["flow_id"], {"method": "bankid"})
+
+
+async def _start_bankid(hass: HomeAssistant, idp: str = "stockholm_par"):
+    """Menyn, kommunvalet och sedan BankID-väntan."""
+    step = await _start_municipality_step(hass)
+    return await hass.config_entries.flow.async_configure(step["flow_id"], {"idp": idp})
 
 
 async def _settle() -> None:
@@ -211,7 +219,7 @@ async def test_bankid_progress_shows_a_refreshing_qr_and_the_same_device_link(
     await _finish_bankid(hass, flow_id)
     (entry,) = hass.config_entries.async_entries(DOMAIN)
     # BankID är vägen till appens refresh-token; det är den som sparas.
-    assert entry.data == {"refresh_token": "rt-new"}
+    assert entry.data == {"refresh_token": "rt-new", "idp": "stockholm_par"}
     assert entry.title == "InfoMentor (1 barn)"
 
 
@@ -385,3 +393,94 @@ async def test_the_retry_form_shows_the_detail(hass: HomeAssistant, bankid_valid
     result = await _finish_bankid(hass, result["flow_id"])
     assert result["step_id"] == "bankid_retry"
     assert result["description_placeholders"]["detail"] == "Sett: inget. Slut: BankIDError: slut"
+
+
+@pytest.fixture
+def two_municipalities():
+    """Ett andra BankID-läge, så att kommunvalet visas."""
+    other = type("OtherDriver", (), {"NAME": "Annan Kommun"})
+    with patch.dict(DRIVERS, {"other_par": other}):
+        yield
+
+
+async def test_the_municipality_step_is_shown_even_with_one_choice_and_stored_with_the_entry(
+    hass: HomeAssistant, bankid_validate
+) -> None:
+    seen = []
+
+    async def fake_validate(hass, idp, progress):
+        seen.append(idp)
+        return [{"id": "1"}], "rt"
+
+    bankid_validate["fn"] = fake_validate
+    step = await _start_municipality_step(hass)
+    assert step["type"] == data_entry_flow.FlowResultType.FORM
+    assert step["step_id"] == "municipality"
+    schema = step["data_schema"].schema
+    assert [o["value"] for o in schema["idp"].config["options"]] == ["stockholm_par"]
+
+    result = await hass.config_entries.flow.async_configure(step["flow_id"], {"idp": "stockholm_par"})
+    await _finish_bankid(hass, result["flow_id"])
+
+    (entry,) = hass.config_entries.async_entries(DOMAIN)
+    assert seen == ["stockholm_par"]
+    assert entry.data == {"refresh_token": "rt", "idp": "stockholm_par"}
+
+
+async def test_with_several_municipalities_the_user_picks_one_and_its_idp_is_used(
+    hass: HomeAssistant, bankid_validate, two_municipalities
+) -> None:
+    seen = []
+
+    async def fake_validate(hass, idp, progress):
+        seen.append(idp)
+        return [{"id": "1"}], "rt"
+
+    bankid_validate["fn"] = fake_validate
+    result = await _start_municipality_step(hass)
+    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["step_id"] == "municipality"
+    options = result["data_schema"].schema["idp"].config["options"]
+    assert {o["value"]: o["label"] for o in options} == {
+        "stockholm_par": "Stockholms Stad",
+        "other_par": "Annan Kommun",
+    }
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"idp": "other_par"})
+    await _finish_bankid(hass, result["flow_id"])
+
+    (entry,) = hass.config_entries.async_entries(DOMAIN)
+    assert seen == ["other_par"]
+    assert entry.data["idp"] == "other_par"
+
+
+async def test_reauth_signs_in_through_the_municipality_stored_in_the_entry(
+    hass: HomeAssistant, bankid_validate, two_municipalities
+) -> None:
+    seen = []
+
+    async def fake_validate(hass, idp, progress):
+        seen.append(idp)
+        return [{"id": "1"}], "rt-new"
+
+    bankid_validate["fn"] = fake_validate
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={"refresh_token": "rt-old", "idp": "other_par"}, unique_id="x"
+    )
+    entry.add_to_hass(hass)
+    result = await entry.start_reauth_flow(hass)
+    assert result["type"] != data_entry_flow.FlowResultType.FORM  # ingen ny kommunfråga
+    await _finish_bankid(hass, result["flow_id"])
+
+    assert seen == ["other_par"]
+    assert entry.data["refresh_token"] == "rt-new"
+
+
+async def test_reauth_of_an_entry_without_a_stored_municipality_asks_for_it(
+    hass: HomeAssistant, bankid_validate
+) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, data={"refresh_token": "rt-old"}, unique_id="x")
+    entry.add_to_hass(hass)
+    result = await entry.start_reauth_flow(hass)
+    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["step_id"] == "municipality"

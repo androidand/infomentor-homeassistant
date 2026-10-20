@@ -8,6 +8,13 @@
           "method": "Inloggningssätt"
         }
       },
+      "municipality": {
+        "title": "Välj kommun",
+        "description": "Bara kommuner med stödd BankID-inloggning visas. Fler läggs till efter hand.",
+        "data": {
+          "idp": "Kommun"
+        }
+      },
       "reauth_confirm": {
         "title": "Logga in igen",
         "description": "Dina InfoMentor-uppgifter accepteras inte längre.",

@@ -20,6 +20,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .api import (
+    DRIVERS,
     CannotConnect,
     InfomentorApi,
     InvalidAuth,
@@ -27,6 +28,7 @@ from .api import (
 from .bankid_session import BankIdLogin
 from .const import (
     CONF_ENABLE_LUNCH,
+    CONF_IDP,
     CONF_MATEO_UNIT,
     CONF_NAMES,
     CONF_PASSWORD,
@@ -35,7 +37,6 @@ from .const import (
     CONF_USERNAME,
     DEFAULT_SCAN_INTERVAL_MIN,
     DOMAIN,
-    IDP_STOCKHOLM_PAR,
     MAX_SCAN_INTERVAL_MIN,
     MIN_SCAN_INTERVAL_MIN,
 )
@@ -125,6 +126,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         super().__init__()
         self._bankid: BankIdLogin | None = None
+        self._idp: str | None = None
         self._bankid_error = "unknown"
         self._bankid_detail = ""
 
@@ -152,15 +154,17 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_bankid(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Interaktiv BankID-inloggning (Stockholm Stad) som ett progress-steg.
+        """Interaktiv BankID-inloggning som ett progress-steg.
 
         Varje ny QR-bild gör väntan klar så HA kör om steget och visar den nya
         koden — så kan en roterande QR visas i en dialog.
         """
+        if self._idp is None:
+            return await self.async_step_municipality()
         if self._bankid is None:
+            idp = self._idp
             self._bankid = BankIdLogin(
-                self.hass,
-                lambda progress: _validate_bankid(self.hass, IDP_STOCKHOLM_PAR, progress),
+                self.hass, lambda progress: _validate_bankid(self.hass, idp, progress)
             )
         login = self._bankid
         if login.done:
@@ -170,6 +174,27 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
             progress_action=login.progress_action,
             progress_task=login.wait_for_change(),
             description_placeholders=login.placeholders(),
+        )
+
+    async def async_step_municipality(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Välj kommun. Bara kommuner med en BankID-drivrutin (DRIVERS) kan väljas."""
+        if user_input is not None:
+            self._idp = user_input[CONF_IDP]
+            return await self.async_step_bankid()
+        options = [selector.SelectOptionDict(value=idp, label=d.NAME) for idp, d in DRIVERS.items()]
+        return self.async_show_form(
+            step_id="municipality",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_IDP, default=next(iter(DRIVERS))): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=options, mode=selector.SelectSelectorMode.DROPDOWN
+                        )
+                    )
+                }
+            ),
         )
 
     async def async_step_bankid_done(
@@ -195,7 +220,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
         return self.async_create_entry(
             title=_title(pupils),
-            data={CONF_REFRESH_TOKEN: refresh_token},
+            data={CONF_REFRESH_TOKEN: refresh_token, CONF_IDP: self._idp},
         )
 
     async def async_step_bankid_retry(
@@ -255,6 +280,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         entry = self._get_reauth_entry()
         errors: dict[str, str] = {}
         if CONF_REFRESH_TOKEN in entry.data:
+            self._idp = entry.data.get(CONF_IDP)
             return await self.async_step_bankid()
         if user_input is not None:
             username = user_input[CONF_USERNAME].strip()

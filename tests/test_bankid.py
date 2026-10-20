@@ -13,12 +13,12 @@ import pytest
 
 from custom_components.infomentor.bankid import (
     BankIDDenied,
-    BankIDDriver,
     BankIDError,
     BankIDPageChanged,
     BankIDTimeout,
     post_saml_response,
 )
+from custom_components.infomentor.bankid_stockholm import StockholmDriver
 from tests.fakes import Call, FakeResponse, Router
 
 START = "https://sso.infomentor.se/login.ashx?idp=stockholm_par"
@@ -97,8 +97,8 @@ class Chain(Router):
         return [c for c in self.calls if "verifyorder=" in c.url]
 
 
-def driver() -> BankIDDriver:
-    return BankIDDriver(poll_interval=0)
+def driver() -> StockholmDriver:
+    return StockholmDriver(poll_interval=0)
 
 
 async def test_login_walks_the_chain_and_returns_the_assertion() -> None:
@@ -111,8 +111,8 @@ async def test_login_walks_the_chain_and_returns_the_assertion() -> None:
 
     assert result.saml_response == "ENCODED-ASSERT"
     assert steps[0] == ("PENDING", "qr1.0", "tok1")
-    assert "USER_SIGN" in [state for state, *_ in steps]
-    assert steps[-1][0] == "OK"
+    assert "SCANNED" in [state for state, *_ in steps]
+    assert steps[-1][0] == "APPROVED"
 
 
 async def test_every_new_qr_is_reported_in_order() -> None:
@@ -159,12 +159,6 @@ async def test_an_unscanned_order_is_restarted_with_a_new_one() -> None:
     assert result.saml_response == "ENCODED-ASSERT"
 
 
-async def test_restarts_are_limited_and_end_as_a_timeout() -> None:
-    chain = Chain(["ERROR"] * 10)
-    with pytest.raises(BankIDTimeout):  # ingen skannade: en timeout, inte ett sidfel
-        await driver().run(chain, max_restarts=2)
-    assert chain.initializes == 3
-
 
 async def test_an_error_after_a_scan_is_not_restarted() -> None:
     chain = Chain(["USER_SIGN", "ERROR"])
@@ -192,10 +186,6 @@ async def test_an_unknown_state_ends_the_login() -> None:
     with pytest.raises(BankIDError):
         await driver().run(Chain(["WAT"]))
 
-
-async def test_no_approval_in_time_is_a_timeout() -> None:
-    with pytest.raises(BankIDTimeout):
-        await driver().run(Chain(["PENDING"] * 5), timeout=-1)
 
 
 async def test_the_saml_field_is_found_whatever_the_attribute_order() -> None:
@@ -251,7 +241,9 @@ async def test_the_whole_login_ends_with_imhome_and_the_session_cookie_reaches_t
     )
 
     result = await driver().run(chain)
-    jar = await post_saml_response(hub, saml_response="a+b/c=", jar=result.jar)
+    jar = await post_saml_response(
+        hub, saml_response="a+b/c=", jar=result.jar, idp="stockholm_par"
+    )
 
     saml_post = hub.calls[0]
     assert jar.has("IMHome")

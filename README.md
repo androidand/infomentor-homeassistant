@@ -56,7 +56,7 @@ folder and restart.
 
 Sign in one of two ways:
 
-- **BankID (Stockholm Stad only)** — scan a QR code with the BankID app, or tap
+- **BankID (Stockholm Stad so far)** — scan a QR code with the BankID app, or tap
   the link on the phone that has it.
 - **Email and password** — for municipalities that still use the classic
   account.
@@ -73,6 +73,28 @@ Sensitive fields are redacted in the diagnostics file.
 | Fetch school lunch | off | Download the menu from Mateo. |
 | Mateo unit id | – | Numeric id from `meny.mateo.se/<municipality>/<id>`. |
 | Nicknames | – | One per line: `Lastname, Firstname = Nickname`. |
+
+### Other municipalities
+
+BankID works through each municipality's own login provider, so every municipality
+needs its own small driver. Only Stockholm Stad has one so far; email and password
+works everywhere. To add yours:
+
+1. Capture one real BankID login to your municipality (the page it starts on, how the
+   QR code is fetched, how the order is polled, and where the SAML response is posted
+   back to `sso.infomentor.se`). Keep tokens and cookie values out of anything you share.
+2. Add a module like `bankid_stockholm.py` with a class that has a `NAME` and
+   `async run(do_request, *, progress)`. It opens the provider's pages, then hands the
+   waiting to `wait_for_approval(start, poll, ...)` (timeout, restarts of unscanned QR
+   codes and progress reporting are shared), and ends with `saml_result(page, jar)`.
+   Your `start` creates an order and your `poll` maps the provider's states to
+   `PENDING`/`SCANNED`/`APPROVED`/`CANCELLED`/`EXPIRED`.
+3. Register it in `DRIVERS` in `api.py`, keyed by the `idp` value from
+   `https://sso.infomentor.se/login.ashx?idp=<value>`. It then appears in the
+   municipality list when you add the integration.
+4. Add tests shaped like your capture, as in `tests/test_bankid.py`.
+
+Keep each municipality in its own module so a fix for one cannot change another.
 
 ## Automation ideas
 

@@ -106,7 +106,7 @@ async def test_a_real_change_reloads_once_and_only_once(hass) -> None:
 @pytest.fixture
 def token_entry(hass: HomeAssistant):
     entry = MockConfigEntry(
-        domain=DOMAIN, data={"refresh_token": "dead"}
+        domain=DOMAIN, data={"refresh_token": "dead", "idp": "stockholm_par"}
     )
     entry.add_to_hass(hass)
     return entry

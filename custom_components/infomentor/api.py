@@ -19,7 +19,8 @@ from typing import Any
 import aiohttp
 from yarl import URL
 
-from .bankid import BankIDDriver, post_saml_response
+from .bankid import post_saml_response
+from .bankid_stockholm import StockholmDriver
 from .const import HUB_BASE, IDP_STOCKHOLM_PAR, MATEO_API, MENTOR_LOGIN, USER_AGENT
 from .token_client import (
     Blocked,
@@ -79,6 +80,9 @@ class RevokedAuth(InvalidAuth):
 # Hubbens svar när ett anrop inte är tillåtet för användaren (eller sessionen dött).
 UNAUTHORIZED_HANDLER = "/Home/Home/HandleUnauthorizedRequest"
 
+# En BankID-drivrutin per IdP (se bankid.py). En ny kommun läggs till här.
+DRIVERS = {IDP_STOCKHOLM_PAR: StockholmDriver}
+
 
 def new_raw_cookie_session() -> aiohttp.ClientSession:
     """En session utan egen cookie-jar, för flöden som skickar `Cookie` själva.
@@ -120,21 +124,24 @@ class InfomentorApi:
         self.pupils = extract_pupils(root)
 
     async def async_login_with_bankid(
-        self, *, idp: str = IDP_STOCKHOLM_PAR, progress: Any | None = None
+        self, *, idp: str, progress: Any | None = None
     ) -> tuple[list[dict[str, Any]], str]:
-        """Logga in med BankID (Stockholm Stad) och returnera (barn, appens refresh-token).
+        """Logga in med BankID via kommunens IdP och returnera (barn, appens refresh-token).
 
         Webbsessionen räcker bara ~40 min, så den paras direkt till appens roterande
         refresh-token, den hållbara uppgiften. Kastar InvalidAuth, CannotConnect eller
         en BankIDError.
         """
-        driver = BankIDDriver()
+        driver_class = DRIVERS.get(idp)
+        if driver_class is None:
+            raise ValueError(f"BankID stöds inte för {idp}")
+        driver = driver_class()
         async with new_raw_cookie_session() as raw:
             request = make_aiohttp_request(raw)
-            result = await driver.run(request, idp=idp, progress=progress)
+            result = await driver.run(request, progress=progress)
             try:
                 jar = await post_saml_response(
-                    request, saml_response=result.saml_response, jar=result.jar
+                    request, saml_response=result.saml_response, jar=result.jar, idp=idp
                 )
                 await self._enter_hub(jar, TokenError, "hubben avvisade BankID-sessionen")
                 token = await pair_app_token(request, jar, device_identifier=secrets.token_hex(8))
