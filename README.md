@@ -23,6 +23,7 @@ One device per child, plus a hub device:
 | `sensor.<child>_school_day` | sensor | school day start–end (next school day, e.g. `08:00–14:40`), with the first/last lesson as attributes |
 | `sensor.<child>_assignments_due` | sensor | number of assignments due within 7 days, with the list as an attribute |
 | `sensor.<child>_next_event` | sensor | next calendar event (test, trip, …) |
+| `calendar.<child>_calendar` | calendar | the school calendar (tests, trips, homework days …) for the next 30 days, usable in the calendar view and in `calendar.get_events` |
 | `sensor.<child>_weekly_letter` | sensor | the teacher's **weekly letter** (learnlog): latest title, with full text, subject, date and attachments as attributes |
 | `sensor.<child>_plans` | sensor | number of **plans** (Unit of Learning) in progress, with the open ones — title, subject, period, teacher, state and their `assignments` (the tests and homework linked to the plan) — as attributes. Identical duplicates (same title, subject, period and teachers) are merged into one |
 | `binary_sensor.<child>_pe_next_school_day` | binary sensor | on when PE/gymnastics is coming up — *remember the gym bag* |

@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 
 from .coordinator import InfomentorCoordinator
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.CALENDAR]
 
 
 @dataclass(slots=True)

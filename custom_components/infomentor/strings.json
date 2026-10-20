@@ -79,6 +79,11 @@
       "pe_next_school_day": {
         "name": "PE next school day"
       }
+    },
+    "calendar": {
+      "calendar": {
+        "name": "Calendar"
+      }
     }
   }
 }

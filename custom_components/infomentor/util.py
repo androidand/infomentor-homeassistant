@@ -216,6 +216,31 @@ def normalize_calendar(raw: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]
     return out
 
 
+def _parse_naive(value: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value or "")[:19])
+    except ValueError:
+        return None
+
+
+def calendar_span(entry: Mapping[str, Any]) -> tuple[date | datetime, date | datetime] | None:
+    """Start och slut för en kalenderpost så som en HA-kalender vill ha dem.
+
+    Heldagsposter får datum och ett exklusivt slutdatum (hubben anger sista dagen);
+    övriga får lokala klockslag, minst en timme långa. None om starten inte går att läsa.
+    """
+    start = _parse_naive(entry.get("start"))
+    if start is None:
+        return None
+    end = _parse_naive(entry.get("end"))
+    if entry.get("all_day"):
+        last = max(end.date(), start.date()) if end else start.date()
+        return start.date(), last + timedelta(days=1)
+    if end is None or end <= start:
+        end = start + timedelta(hours=1)
+    return start, end
+
+
 def normalize_tasks(raw: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """task/GetTasks -> uppgifter."""
     out: list[dict[str, Any]] = []

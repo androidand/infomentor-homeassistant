@@ -79,6 +79,11 @@
       "pe_next_school_day": {
         "name": "Idrott nästa skoldag"
       }
+    },
+    "calendar": {
+      "calendar": {
+        "name": "Kalender"
+      }
     }
   }
 }

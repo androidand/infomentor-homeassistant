@@ -23,6 +23,11 @@
         "default": "mdi:newspaper-variant-outline"
       }
     },
+    "calendar": {
+      "calendar": {
+        "default": "mdi:calendar-school"
+      }
+    },
     "binary_sensor": {
       "pe_next_school_day": {
         "default": "mdi:run"

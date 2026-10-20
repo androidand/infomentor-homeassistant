@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 import unittest
-from datetime import date
+from datetime import date, datetime
 
 MODULE_PATH = (
     pathlib.Path(__file__).resolve().parents[1] / "custom_components" / "infomentor" / "util.py"
@@ -231,6 +231,24 @@ class TestLearnlogAndNews(unittest.TestCase):
         self.assertEqual(out[0]["subject"], "Idrott och hälsa")
         self.assertEqual(out[0]["attachments"], ["plan.docx"])
         self.assertEqual(util.normalize_learnlog({}), [])
+
+    def test_calendar_span_gives_all_day_posts_an_exclusive_end_date(self):
+        entry = {"start": "2026-10-23T00:00:00", "end": "2026-10-23T23:59:59", "all_day": True}
+        self.assertEqual(util.calendar_span(entry), (date(2026, 10, 23), date(2026, 10, 24)))
+        multi = {"start": "2026-10-23T00:00:00", "end": "2026-10-25T23:59:59", "all_day": True}
+        self.assertEqual(util.calendar_span(multi), (date(2026, 10, 23), date(2026, 10, 26)))
+        no_end = {"start": "2026-10-23T00:00:00", "end": "", "all_day": True}
+        self.assertEqual(util.calendar_span(no_end), (date(2026, 10, 23), date(2026, 10, 24)))
+
+    def test_calendar_span_keeps_clock_times_and_never_ends_before_it_starts(self):
+        timed = {"start": "2026-10-23T09:00:00", "end": "2026-10-23T10:30:00", "all_day": False}
+        self.assertEqual(
+            util.calendar_span(timed),
+            (datetime(2026, 10, 23, 9, 0), datetime(2026, 10, 23, 10, 30)),
+        )
+        broken = {"start": "2026-10-23T09:00:00", "end": "2026-10-23T08:00:00", "all_day": False}
+        self.assertEqual(util.calendar_span(broken)[1], datetime(2026, 10, 23, 10, 0))
+        self.assertIsNone(util.calendar_span({"start": "", "end": "", "all_day": False}))
 
     def test_normalize_news_sorts_and_limits(self):
         raw = [
