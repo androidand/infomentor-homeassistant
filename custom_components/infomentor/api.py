@@ -124,7 +124,7 @@ class InfomentorApi:
         self.pupils = extract_pupils(root)
 
     async def async_login_with_bankid(
-        self, *, idp: str = IDP_STOCKHOLM_PAR, progress: Any | None = None
+        self, *, idp: str, progress: Any | None = None
     ) -> tuple[list[dict[str, Any]], str]:
         """Logga in med BankID via kommunens IdP och returnera (barn, appens refresh-token).
 

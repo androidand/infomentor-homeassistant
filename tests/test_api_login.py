@@ -117,7 +117,7 @@ async def test_a_bankid_login_returns_the_children_and_the_paired_token(api) -> 
     with ExitStack() as stack:
         for p in _bankid(api, pair=pair):
             stack.enter_context(p)
-        pupils, refresh_token = await api.async_login_with_bankid()
+        pupils, refresh_token = await api.async_login_with_bankid(idp="stockholm_par")
     assert (pupils, refresh_token) == ([{"id": "1"}], "r2")
     assert len(pair.await_args.kwargs["device_identifier"]) == 16
 
@@ -129,7 +129,7 @@ async def test_a_bankid_hop_that_fails_is_reported_as_a_refused_login(api, step)
     with ExitStack() as stack, pytest.raises(InvalidAuth):
         for p in patches:
             stack.enter_context(p)
-        await api.async_login_with_bankid()
+        await api.async_login_with_bankid(idp="stockholm_par")
 
 
 async def test_each_municipality_gets_its_own_driver_and_its_own_idp_in_the_saml_post(api) -> None:

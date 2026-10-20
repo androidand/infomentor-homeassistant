@@ -17,6 +17,7 @@ CONF_MATEO_UNIT: Final = "mateo_unit_id"
 CONF_NAMES: Final = "names"
 CONF_USERNAME: Final = "username"
 CONF_PASSWORD: Final = "password"
+CONF_IDP: Final = "idp"
 CONF_REFRESH_TOKEN: Final = "refresh_token"
 
 DEFAULT_SCAN_INTERVAL_MIN: Final = 20
@@ -34,7 +35,7 @@ USER_AGENT: Final = (
     "(KHTML, like Gecko) Chrome/101.0.4951.67 Safari/537.36"
 )
 
-# BankID via Stockholms stad. `idp` skiljer sig mellan skolor.
+# BankID: varje kommun har en egen `idp` (se bankid.py).
 SSO_LOGIN_PATH: Final = "/login.ashx"
 IDP_STOCKHOLM_PAR: Final = "stockholm_par"
 

@@ -56,6 +56,8 @@ class StockholmDriver:
     `fetch` och `follow` (web.py) gör det och samlar cookies i en jar över hela kedjan.
     """
 
+    NAME = "Stockholms Stad"  # visas i kommunlistan
+
     def __init__(self, *, poll_interval: float = POLL_INTERVAL_SECONDS) -> None:
         self._poll_interval = poll_interval
 

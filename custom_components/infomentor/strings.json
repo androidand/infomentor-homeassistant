@@ -8,6 +8,13 @@
           "method": "Sign-in method"
         }
       },
+      "municipality": {
+        "title": "Choose municipality",
+        "description": "Only municipalities with a supported BankID login are listed. More are added over time.",
+        "data": {
+          "idp": "Municipality"
+        }
+      },
       "reauth_confirm": {
         "title": "Sign in again",
         "description": "Your InfoMentor credentials are no longer accepted.",
