@@ -95,11 +95,22 @@
       },
       "news": {
         "name": "School news"
+      },
+      "fritids": {
+        "name": "Leisure-time centre today"
       }
     },
     "binary_sensor": {
       "pe_next_school_day": {
         "name": "PE next school day"
+      }
+    },
+    "calendar": {
+      "calendar": {
+        "name": "Calendar"
+      },
+      "fritids_calendar": {
+        "name": "Leisure-time centre"
       }
     }
   },

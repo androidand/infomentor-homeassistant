@@ -95,11 +95,22 @@
       },
       "news": {
         "name": "Skolans nyheter"
+      },
+      "fritids": {
+        "name": "Fritids idag"
       }
     },
     "binary_sensor": {
       "pe_next_school_day": {
         "name": "Idrott nästa skoldag"
+      }
+    },
+    "calendar": {
+      "calendar": {
+        "name": "Kalender"
+      },
+      "fritids_calendar": {
+        "name": "Fritids"
       }
     }
   },

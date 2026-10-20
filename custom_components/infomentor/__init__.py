@@ -14,7 +14,7 @@ from homeassistant.core import HomeAssistant
 from .const import CONF_REFRESH_TOKEN
 from .coordinator import InfomentorCoordinator
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.CALENDAR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

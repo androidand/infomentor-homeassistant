@@ -21,6 +21,17 @@
       },
       "news": {
         "default": "mdi:newspaper-variant-outline"
+      },
+      "fritids": {
+        "default": "mdi:human-child"
+      }
+    },
+    "calendar": {
+      "calendar": {
+        "default": "mdi:calendar-school"
+      },
+      "fritids_calendar": {
+        "default": "mdi:human-child"
       }
     },
     "binary_sensor": {
