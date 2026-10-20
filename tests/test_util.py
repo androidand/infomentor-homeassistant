@@ -232,6 +232,44 @@ class TestLearnlogAndNews(unittest.TestCase):
         self.assertEqual(out[0]["attachments"], ["plan.docx"])
         self.assertEqual(util.normalize_learnlog({}), [])
 
+    def test_normalize_attendance_keeps_the_flags_sessions_and_recent_history(self):
+        raw = {
+            "absentToday": False,
+            "absentTomorrow": True,
+            "absenceTodaySessions": [
+                {"title": "FKL", "formattedTimeString": "09:10-10:25", "isAbsent": True},
+                {"title": "FKL", "formattedTimeString": "11:30-12:55", "isAbsent": False},
+            ],
+            "absenceTomorrowSessions": [],
+            "leaveRequests": [{"id": 1}],
+            "pagedList": {
+                "items": [
+                    {"shortDate": "2026-10-19", "time": "08:30", "reason": "Föranmäld",
+                     "minutes": "50", "comment": ""},
+                    {"shortDate": "2026-10-16", "time": None, "reason": "Föranmäld",
+                     "minutes": None, "comment": None},
+                ]
+            },
+        }
+        out = util.normalize_attendance(raw)
+        self.assertEqual(out["today"], ["FKL 09:10-10:25"])
+        self.assertEqual(out["pending_leave"], 1)
+        self.assertEqual(
+            out["history"][0],
+            {"date": "2026-10-19", "time": "08:30", "reason": "Föranmäld", "minutes": "50",
+             "comment": ""},
+        )
+        self.assertEqual(out["history"][1]["time"], "")  # None blir tom text
+        self.assertEqual(util.normalize_attendance({})["history"], [])
+
+    def test_is_absent_counts_a_whole_day_flag_or_single_lessons(self):
+        none = {"absent_today": False, "today": [], "absent_tomorrow": False, "tomorrow": []}
+        self.assertFalse(util.is_absent(none, "today"))
+        self.assertTrue(util.is_absent({**none, "absent_today": True}, "today"))
+        self.assertTrue(util.is_absent({**none, "today": ["FKL 09:10-10:25"]}, "today"))
+        self.assertFalse(util.is_absent({**none, "today": ["x"]}, "tomorrow"))
+        self.assertTrue(util.is_absent({**none, "absent_tomorrow": True}, "tomorrow"))
+
     def test_normalize_news_sorts_and_limits(self):
         raw = [
             {"id": 1, "title": "Äldre", "publishedDate": "2026-09-01"},

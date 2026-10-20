@@ -73,11 +73,17 @@
       },
       "news": {
         "name": "School news"
+      },
+      "last_absence": {
+        "name": "Last absence"
       }
     },
     "binary_sensor": {
       "pe_next_school_day": {
         "name": "PE next school day"
+      },
+      "absent_today": {
+        "name": "Absent today"
       }
     }
   }

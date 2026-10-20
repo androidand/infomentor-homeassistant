@@ -73,11 +73,17 @@
       },
       "news": {
         "name": "Skolans nyheter"
+      },
+      "last_absence": {
+        "name": "Senaste frånvaro"
       }
     },
     "binary_sensor": {
       "pe_next_school_day": {
         "name": "Idrott nästa skoldag"
+      },
+      "absent_today": {
+        "name": "Frånvarande idag"
       }
     }
   }

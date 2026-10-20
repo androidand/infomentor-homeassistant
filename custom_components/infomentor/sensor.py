@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -41,6 +41,7 @@ async def async_setup_entry(
             entities.append(NextEventSensor(coordinator, entry, pupil))
             entities.append(LearnlogSensor(coordinator, entry, pupil))
             entities.append(PlansSensor(coordinator, entry, pupil))
+            entities.append(LastAbsenceSensor(coordinator, entry, pupil))
         entities.append(NewsSensor(coordinator, entry))
         if data.lunch_unit:
             entities.append(LunchSensor(coordinator, entry))
@@ -197,6 +198,36 @@ class LearnlogSensor(_PupilSensor):
                 }
                 for e in pupil.learnlog[:5]
             ],
+        }
+
+
+class LastAbsenceSensor(_PupilSensor):
+    """Datum för senaste frånvaroregistreringen; de senaste ligger som attribut."""
+
+    _attr_translation_key = "last_absence"
+    _attr_icon = "mdi:calendar-remove-outline"
+    _attr_device_class = SensorDeviceClass.DATE
+
+    def __init__(self, coordinator, entry, pupil) -> None:
+        super().__init__(coordinator, entry, pupil, "last_absence")
+
+    @property
+    def native_value(self) -> date | None:
+        pupil = self.pupil
+        history = pupil.attendance.get("history") if pupil else None
+        try:
+            return date.fromisoformat(history[0]["date"]) if history else None
+        except ValueError:
+            return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        pupil = self.pupil
+        history = pupil.attendance.get("history", []) if pupil else []
+        return {
+            "reason": history[0]["reason"] if history else None,
+            "history": history,
+            "pending_leave_requests": pupil.attendance.get("pending_leave", 0) if pupil else 0,
         }
 
 
