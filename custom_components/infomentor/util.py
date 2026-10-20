@@ -337,6 +337,11 @@ def normalize_notifications(
     return out
 
 
+def is_absent(attendance: Mapping[str, Any], when: str) -> bool:
+    """Är barnet anmält frånvarande idag eller imorgon (hel dag eller enskilda lektioner)?"""
+    return bool(attendance.get(f"absent_{when}") or attendance.get(when))
+
+
 def normalize_attendance(raw: Mapping[str, Any]) -> dict[str, Any]:
     """attendance/appData -> närvaro."""
 
@@ -347,7 +352,20 @@ def normalize_attendance(raw: Mapping[str, Any]) -> dict[str, Any]:
             if s.get("isAbsent")
         ]
 
+    registered = (raw.get("pagedList") or {}).get("items") or []
+    history = [
+        {
+            "date": day_of(item.get("shortDate")),
+            "time": str(item.get("time") or ""),
+            "reason": str(item.get("reason") or ""),
+            "minutes": str(item.get("minutes") or ""),
+            "comment": str(item.get("comment") or ""),
+        }
+        for item in registered[:10]
+        if isinstance(item, Mapping)
+    ]
     return {
+        "history": history,
         "absent_today": bool(raw.get("absentToday")),
         "absent_tomorrow": bool(raw.get("absentTomorrow")),
         "today": sessions("absenceTodaySessions"),

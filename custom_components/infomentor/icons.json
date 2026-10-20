@@ -24,6 +24,9 @@
       },
       "fritids": {
         "default": "mdi:human-child"
+      },
+      "last_absence": {
+        "default": "mdi:calendar-remove-outline"
       }
     },
     "calendar": {
@@ -37,6 +40,9 @@
     "binary_sensor": {
       "pe_next_school_day": {
         "default": "mdi:run"
+      },
+      "absent_today": {
+        "default": "mdi:account-off-outline"
       }
     }
   }
