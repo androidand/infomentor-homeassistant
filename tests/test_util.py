@@ -232,6 +232,46 @@ class TestLearnlogAndNews(unittest.TestCase):
         self.assertEqual(out[0]["attachments"], ["plan.docx"])
         self.assertEqual(util.normalize_learnlog({}), [])
 
+    def test_weekly_letter_is_the_newest_news_item_that_names_it(self):
+        raw = [
+            {"id": 1, "title": "Veckobrev v 42", "publishedDate": "2026-10-09T00:00:00"},
+            {
+                "id": 2,
+                "title": "Veckobrev v 43",
+                "content": "<p>Hej allihopa!</p><p>Fredag: läxa.</p>",
+                "publishedDate": "2026-10-16T00:00:00",
+                "attachments": [{"title": "Brev.pdf", "url": "/Resources/Resource/Download/9?api=IM2"}],
+            },
+            {"id": 3, "title": "Biblioteket", "publishedDate": "2026-10-17T00:00:00"},
+        ]
+        letter = util.weekly_letter_from_news(raw, "https://hub.example")
+        self.assertEqual(letter["title"], "Veckobrev v 43")
+        self.assertEqual(letter["text"], "Hej allihopa! Fredag: läxa.")
+        self.assertEqual(letter["modified"], "2026-10-16")
+        self.assertEqual(letter["attachments"], ["Brev.pdf"])
+        self.assertEqual(
+            letter["attachment_urls"], ["https://hub.example/Resources/Resource/Download/9?api=IM2"]
+        )
+
+    def test_weekly_letter_matches_case_insensitively_and_is_none_without_a_match(self):
+        self.assertIsNotNone(util.weekly_letter_from_news([{"title": "VECKOINFO 5B"}]))
+        self.assertIsNone(util.weekly_letter_from_news([{"title": "Biblioteket"}]))
+        self.assertIsNone(util.weekly_letter_from_news([]))
+        self.assertIsNone(util.weekly_letter_from_news(None))
+
+    def test_weekly_letter_text_is_capped(self):
+        letter = util.weekly_letter_from_news(
+            [{"title": "Veckobrev", "content": "x" * 5000}], max_chars=100
+        )
+        self.assertEqual(len(letter["text"]), 100)
+
+    def test_the_learnlog_wins_and_the_news_letter_is_the_fallback(self):
+        log = [{"title": "Vecka 40"}]
+        letter = {"title": "Veckobrev v 43"}
+        self.assertEqual(util.weekly_letter_entries(log, letter), (log, "learnlog"))
+        self.assertEqual(util.weekly_letter_entries([], letter), ([letter], "news"))
+        self.assertEqual(util.weekly_letter_entries([], None), ([], None))
+
     def test_normalize_news_sorts_and_limits(self):
         raw = [
             {"id": 1, "title": "Äldre", "publishedDate": "2026-09-01"},

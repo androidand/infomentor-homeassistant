@@ -15,6 +15,7 @@ from typing import Any
 BREAK_RE = re.compile(r"^(lunch|rast|ombyte|m-tid|studietid|frukost)$", re.IGNORECASE)
 PE_RE = re.compile(r"\b(idh|idr|idrott|gymnastik|gympa)\b", re.IGNORECASE)
 DONE_RE = re.compile(r"done|complete|klar", re.IGNORECASE)
+LETTER_RE = re.compile(r"veckobrev|veckoinfo", re.IGNORECASE)
 
 
 # --------------------------------------------------------------- namn och tid
@@ -310,6 +311,47 @@ def normalize_learnlog(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def weekly_letter_from_news(
+    raw: Iterable[Mapping[str, Any]], base_url: str = "", max_chars: int = 1000
+) -> dict[str, Any] | None:
+    """Veckobrevet ur nyhetslistan, i lärloggens form.
+
+    Många skolor lägger veckobrevet som en nyhet (Information → Nyheter) och inte i
+    lärloggen. Det är den senaste nyheten vars rubrik nämner veckobrev eller veckoinfo.
+    Bilagornas länkar är relativa och blir fullständiga med `base_url`.
+    """
+    letters = [
+        item
+        for item in raw or []
+        if isinstance(item, Mapping) and LETTER_RE.search(str(item.get("title") or ""))
+    ]
+    if not letters:
+        return None
+    item = max(letters, key=lambda i: day_of(i.get("publishedDate")))
+    files = [a for a in item.get("attachments") or [] if isinstance(a, Mapping)]
+    return {
+        "id": str(item.get("id") or ""),
+        "title": str(item.get("title") or "").strip(),
+        "text": strip_html(item.get("content"))[:max_chars],
+        "subject": "",
+        "group": "",
+        "modified": day_of(item.get("publishedDate")),
+        "attachments": [str(a.get("title")) for a in files if a.get("title")],
+        "attachment_urls": [f"{base_url}{a['url']}" for a in files if a.get("url")],
+    }
+
+
+def weekly_letter_entries(
+    learnlog: Sequence[Mapping[str, Any]], news_letter: Mapping[str, Any] | None
+) -> tuple[list[Mapping[str, Any]], str | None]:
+    """Lärloggens poster om det finns några, annars veckobrevet ur nyheterna."""
+    if learnlog:
+        return list(learnlog), "learnlog"
+    if news_letter:
+        return [news_letter], "news"
+    return [], None
 
 
 def normalize_plans(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
