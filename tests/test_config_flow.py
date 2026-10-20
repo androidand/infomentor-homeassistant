@@ -156,11 +156,17 @@ async def _finish_bankid(hass: HomeAssistant, flow_id: str):
         return None
 
 
-async def _start_bankid(hass: HomeAssistant):
+async def _start_municipality_step(hass: HomeAssistant):
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
     return await hass.config_entries.flow.async_configure(result["flow_id"], {"method": "bankid"})
+
+
+async def _start_bankid(hass: HomeAssistant, idp: str = "stockholm_par"):
+    """Menyn, kommunvalet och sedan BankID-väntan."""
+    step = await _start_municipality_step(hass)
+    return await hass.config_entries.flow.async_configure(step["flow_id"], {"idp": idp})
 
 
 async def _settle() -> None:
@@ -397,7 +403,7 @@ def two_municipalities():
         yield
 
 
-async def test_a_single_municipality_skips_the_choice_and_is_stored_with_the_entry(
+async def test_the_municipality_step_is_shown_even_with_one_choice_and_stored_with_the_entry(
     hass: HomeAssistant, bankid_validate
 ) -> None:
     seen = []
@@ -407,8 +413,13 @@ async def test_a_single_municipality_skips_the_choice_and_is_stored_with_the_ent
         return [{"id": "1"}], "rt"
 
     bankid_validate["fn"] = fake_validate
-    result = await _start_bankid(hass)
-    assert result["type"] != data_entry_flow.FlowResultType.FORM  # ingen kommunfråga
+    step = await _start_municipality_step(hass)
+    assert step["type"] == data_entry_flow.FlowResultType.FORM
+    assert step["step_id"] == "municipality"
+    schema = step["data_schema"].schema
+    assert [o["value"] for o in schema["idp"].config["options"]] == ["stockholm_par"]
+
+    result = await hass.config_entries.flow.async_configure(step["flow_id"], {"idp": "stockholm_par"})
     await _finish_bankid(hass, result["flow_id"])
 
     (entry,) = hass.config_entries.async_entries(DOMAIN)
@@ -426,7 +437,7 @@ async def test_with_several_municipalities_the_user_picks_one_and_its_idp_is_use
         return [{"id": "1"}], "rt"
 
     bankid_validate["fn"] = fake_validate
-    result = await _start_bankid(hass)
+    result = await _start_municipality_step(hass)
     assert result["type"] == data_entry_flow.FlowResultType.FORM
     assert result["step_id"] == "municipality"
     options = result["data_schema"].schema["idp"].config["options"]
@@ -463,3 +474,13 @@ async def test_reauth_signs_in_through_the_municipality_stored_in_the_entry(
 
     assert seen == ["other_par"]
     assert entry.data["refresh_token"] == "rt-new"
+
+
+async def test_reauth_of_an_entry_without_a_stored_municipality_asks_for_it(
+    hass: HomeAssistant, bankid_validate
+) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, data={"refresh_token": "rt-old"}, unique_id="x")
+    entry.add_to_hass(hass)
+    result = await entry.start_reauth_flow(hass)
+    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["step_id"] == "municipality"

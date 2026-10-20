@@ -160,9 +160,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
         koden — så kan en roterande QR visas i en dialog.
         """
         if self._idp is None:
-            if len(DRIVERS) != 1:
-                return await self.async_step_municipality()
-            (self._idp,) = DRIVERS
+            return await self.async_step_municipality()
         if self._bankid is None:
             idp = self._idp
             self._bankid = BankIdLogin(
@@ -190,7 +188,7 @@ class InfomentorConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="municipality",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_IDP): selector.SelectSelector(
+                    vol.Required(CONF_IDP, default=next(iter(DRIVERS))): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=options, mode=selector.SelectSelectorMode.DROPDOWN
                         )
