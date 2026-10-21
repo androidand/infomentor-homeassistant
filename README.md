@@ -25,9 +25,8 @@ One device per child, plus a hub device:
 | `sensor.<child>_next_event` | sensor | next calendar event (test, trip, …) |
 | `sensor.<child>_weekly_letter` | sensor | the **weekly letter**: latest title, with text, date, attachments (names and links) and `source` as attributes. It comes from the learnlog; schools that publish it as a news item (title containing "veckobrev" or "veckoinfo") are picked up from the news feed instead |
 | `calendar.<child>_calendar` | calendar | the school calendar (tests, trips, homework days …) for the next 30 days, usable in the calendar view and in `calendar.get_events` |
-| `calendar.<child>_fritids` | calendar | the fritids schedule for the week the hub shows: drop-off and pick-up times, leave days and closed days. Only for children that have fritids |
-| `sensor.<child>_fritids_today` | sensor | today's leisure-time centre (fritids) hours, e.g. `08:00–17:00` (empty on leave or closed days), with the week's days as an attribute. Only for children that have fritids |
-| `sensor.<child>_weekly_letter` | sensor | the teacher's **weekly letter** (learnlog): latest title, with full text, subject, date and attachments as attributes |
+| `calendar.<child>_leisure_time_centre` | calendar | the fritids schedule for the week the hub shows: drop-off and pick-up times, leave days and closed days. Only for children that have fritids |
+| `sensor.<child>_leisure_time_centre_today` | sensor | today's leisure-time centre (fritids) hours, e.g. `08:00–17:00` (empty on leave or closed days), with the week's days as an attribute. Only for children that have fritids |
 | `sensor.<child>_plans` | sensor | number of **plans** (Unit of Learning) in progress, with the open ones — title, subject, period, teacher, state and their `assignments` (the tests and homework linked to the plan) — as attributes. Identical duplicates (same title, subject, period and teachers) are merged into one |
 | `binary_sensor.<child>_absent_today` | binary sensor | on when the child is registered absent today (whole day or single lessons); tomorrow and the lessons are attributes |
 | `sensor.<child>_last_absence` | sensor | date of the latest absence registration, with its reason and the recent history (date, time, reason, minutes, comment) as attributes |
@@ -38,7 +37,7 @@ One device per child, plus a hub device:
 > Entity IDs follow your Home Assistant language: the suffixes above are the
 > English names. A Swedish HA gives `…_skoldag`, `…_uppgifter`,
 > `…_nasta_handelse`, `…_veckobrev`, `…_planeringar`,
-> `…_idrott_nasta_skoldag`. Check yours under
+> `…_idrott_nasta_skoldag`, `…_fritids` (calendar), `…_fritids_idag`. Check yours under
 > Settings → Devices & Services → InfoMentor → device → Entities.
 
 Everything is polled on a configurable interval (default 20 minutes) using a
