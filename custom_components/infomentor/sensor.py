@@ -12,7 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from .coordinator import InfomentorCoordinator, PupilData
-from .entity import InfomentorHubEntity, InfomentorPupilEntity
+from .entity import InfomentorHubEntity, InfomentorPupilEntity, add_entities_as_they_appear
 from .util import (
     fritids_today,
     lessons_on,
@@ -41,13 +41,17 @@ async def async_setup_entry(
             entities.append(AssignmentsSensor(coordinator, entry, pupil))
             entities.append(NextEventSensor(coordinator, entry, pupil))
             entities.append(LearnlogSensor(coordinator, entry, pupil))
-            if pupil.fritids:
-                entities.append(FritidsSensor(coordinator, entry, pupil))
             entities.append(PlansSensor(coordinator, entry, pupil))
         entities.append(NewsSensor(coordinator, entry))
         if data.lunch_unit:
             entities.append(LunchSensor(coordinator, entry))
     async_add_entities(entities)
+    add_entities_as_they_appear(
+        entry,
+        coordinator,
+        async_add_entities,
+        lambda pupil: [FritidsSensor(coordinator, entry, pupil)] if pupil.fritids else []
+    )
 
 
 class _PupilSensor(InfomentorPupilEntity, SensorEntity):
