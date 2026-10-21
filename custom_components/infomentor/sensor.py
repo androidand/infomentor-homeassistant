@@ -185,7 +185,7 @@ class LearnlogSensor(_PupilSensor):
     @property
     def native_value(self) -> str | None:
         entries, _ = self._letters()
-        return entries[0]["title"] or None if entries else None
+        return (entries[0]["title"] or None) if entries else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

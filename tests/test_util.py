@@ -253,6 +253,17 @@ class TestLearnlogAndNews(unittest.TestCase):
             letter["attachment_urls"], ["https://hub.example/Resources/Resource/Download/9?api=IM2"]
         )
 
+    def test_weekly_letter_keeps_an_absolute_attachment_url_as_it_is(self):
+        raw = [
+            {
+                "id": 1,
+                "title": "Veckobrev",
+                "attachments": [{"title": "A", "url": "https://files.example/a.pdf"}],
+            }
+        ]
+        letter = util.weekly_letter_from_news(raw, "https://hub.example")
+        self.assertEqual(letter["attachment_urls"], ["https://files.example/a.pdf"])
+
     def test_weekly_letter_matches_case_insensitively_and_is_none_without_a_match(self):
         self.assertIsNotNone(util.weekly_letter_from_news([{"title": "VECKOINFO 5B"}]))
         self.assertIsNone(util.weekly_letter_from_news([{"title": "Biblioteket"}]))
