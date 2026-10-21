@@ -75,3 +75,28 @@ def test_the_current_event_is_the_first_one_that_has_not_ended() -> None:
 
 def test_a_post_without_a_readable_start_is_skipped() -> None:
     assert _calendar(_entry("Trasig", "", ""))._events() == []
+
+
+def test_an_event_in_progress_is_the_current_one_not_the_next() -> None:
+    fmt = "%Y-%m-%dT%H:%M:%S"
+    now = dt_util.now().replace(tzinfo=None)  # hubbens klockslag är lokala utan zon
+    calendar = _calendar(
+        _entry("Pågår", (now - timedelta(hours=1)).strftime(fmt),
+               (now + timedelta(hours=1)).strftime(fmt), uid="a"),
+        _entry("Nästa", (now + timedelta(hours=3)).strftime(fmt),
+               (now + timedelta(hours=4)).strftime(fmt), uid="b"),
+    )
+    assert calendar.event.summary == "Pågår"
+
+
+async def test_a_timed_event_inside_the_range_is_included() -> None:
+    zone = dt_util.DEFAULT_TIME_ZONE
+    found = await _calendar(TIMED).async_get_events(
+        None, datetime(2026, 10, 26, tzinfo=zone), datetime(2026, 10, 27, tzinfo=zone)
+    )
+    assert [e.summary for e in found] == ["Utvecklingssamtal"]
+
+
+def test_a_post_without_an_id_gets_no_uid() -> None:
+    (event,) = _calendar(_entry("Utan id", "2026-10-26T09:00:00", "2026-10-26T10:00:00", uid=""))._events()
+    assert event.uid is None
