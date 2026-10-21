@@ -34,6 +34,7 @@ from .const import (
     HUB_BASE,
     clamp_interval,
 )
+from .probe import Outcome
 from .util import (
     dedupe_plans,
     display_name,
@@ -169,9 +170,7 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
         self, pupils: list[dict[str, Any]], *, strict: bool = True
     ) -> InfomentorData:
         data = InfomentorData()
-        self._ok_calls = 0
-        self._auth_skips = 0
-        self._plan_ids_seen = set()
+        self._begin_round()
         child_by_id: dict[str, str] = {str(p.get("id")): str(p.get("name")) for p in pupils}
 
         for pupil in pupils:
@@ -200,14 +199,15 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
                     f"kalender ({who})", self.api.async_calendar(pupil), [], strict=strict
                 )
             )
-            # Inte alla barn har fritids; ett avvisat anrop är då normalt och ska vara tyst.
+            # Inte alla barn har fritids. Vi frågar, minns svaret och frågar sällan om vi vet att
+            # barnet saknar det (se probe.py); ett fel säger inget och prövas om med uppehåll.
             fritids = normalize_fritids(
-                await self._safe(
+                await self._probed(
+                    f"fritids:{pupil_id}",
                     f"fritids ({who})",
-                    self.api.async_fritids(pupil),
+                    lambda pupil=pupil: self.api.async_fritids(pupil),
                     {},
-                    strict=strict,
-                    quiet=True,
+                    normalize_fritids,
                 )
             )
             tasks = normalize_tasks(
@@ -269,7 +269,25 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
             data.lunch_unit = unit
 
         self._prune_plan_details()
+        self._settle_probes()
         return data
+
+    def _begin_round(self) -> None:
+        self._ok_calls = 0
+        self._auth_skips = 0
+        self._plan_ids_seen = set()
+        # Svar från en omgång som föll (död session) får inte leva vidare.
+        self._probe.discard()
+
+    def _settle_probes(self) -> None:
+        """Det vi lärt oss om valfria delar gäller bara om sessionen levde.
+
+        Gick inget igenom kan ett "nej" lika gärna vara en död session.
+        """
+        if self._ok_calls:
+            self._probe.commit()
+        else:
+            self._probe.discard()
 
     async def _with_plan_details(
         self, plans: list[dict[str, Any]], *, strict: bool
@@ -325,9 +343,36 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
         for plan_id in [key for key in self._plan_details if key not in self._plan_ids_seen]:
             del self._plan_details[plan_id]
 
-    async def _safe(
-        self, label: str, awaitable, default, *, strict: bool = True, quiet: bool = False
-    ):
+    async def _probed(self, key: str, label: str, call, default, normalize):
+        """Hämtar en valfri del om det är dags, och minns om barnet har den.
+
+        Aldrig en ny inloggning för en sådan del: en död session märks på de andra
+        anropen, och ett "nej" gäller först när omgången lyckats (se `_fetch_all`).
+        CannotConnect bubblar upp som alltid.
+        """
+        # Uppehåll eller ett fel ska inte tömma det vi redan har.
+        fallback = self._last_good.get(key, default)
+        if not self._probe.due(key):
+            return fallback
+        try:
+            value = await call()
+        except CannotConnect:
+            raise
+        except InvalidAuth as err:
+            _LOGGER.debug("InfoMentor: %s avvisades (%s) – delen saknas här", label, err)
+            self._probe.record(key, Outcome.REFUSED)
+            self._last_good.pop(key, None)
+            return default
+        except (ApiError, InfomentorError) as err:
+            _LOGGER.debug("InfoMentor: kunde inte hämta %s – försöker igen senare (%s)", label, err)
+            self._probe.record(key, Outcome.ERROR)
+            return fallback
+        self._ok_calls += 1
+        self._last_good[key] = value
+        self._probe.record(key, Outcome.DATA if normalize(value) else Outcome.EMPTY)
+        return value
+
+    async def _safe(self, label: str, awaitable, default, *, strict: bool = True):
         """Hämtar en endpoint; loggar och hoppar över vid endpoint-fel.
 
         I strikt läge (första försöket) bubblar InvalidAuth upp så vi kan logga in
@@ -340,27 +385,19 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
         except CannotConnect:
             raise
         except InvalidAuth as err:
-            # En tyst hämtning gäller något barnet kanske inte har (fritids); en död session
-            # märks på de övriga anropen, så den ska aldrig tvinga fram en ny inloggning.
-            if strict and self._ok_calls == 0 and not quiet:
+            if strict and self._ok_calls == 0:
                 # Inget har gått igenom ännu: sessionen kan vara död, logga in igen.
                 raise
             # Andra anrop i samma omgång gick igenom, så sessionen lever och just den här
             # delen är inte tillåten för användaren (alla barn och skolor har inte alla
             # funktioner). Hoppa över den; en ny inloggning hjälper inte.
-            level = logging.DEBUG if quiet or label in self._not_permitted else logging.WARNING
+            level = logging.DEBUG if label in self._not_permitted else logging.WARNING
             _LOGGER.log(level, "InfoMentor: %s är inte tillåten här – hoppar över (%s)", label, err)
             self._not_permitted.add(label)
-            if not quiet:
-                self._auth_skips += 1
+            self._auth_skips += 1
             return default
         except (ApiError, InfomentorError) as err:
-            _LOGGER.log(
-                logging.DEBUG if quiet else logging.WARNING,
-                "InfoMentor: kunde inte hämta %s – hoppar över (%s)",
-                label,
-                err,
-            )
+            _LOGGER.warning("InfoMentor: kunde inte hämta %s – hoppar över (%s)", label, err)
             return default
         self._ok_calls += 1
         return value

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_NAMES, DOMAIN, HUB_BASE, MANUFACTURER, MODEL
@@ -15,6 +19,38 @@ def resolve_display_name(entry: ConfigEntry, pupil: PupilData) -> str:
     """Smeknamn från options om det finns, annars 'Förnamn Efternamn'."""
     overrides = parse_names_option(entry.options.get(CONF_NAMES))
     return overrides.get(pupil.name) or pupil.display_name or pupil.name
+
+
+def add_entities_as_they_appear(
+    entry: ConfigEntry,
+    coordinator: InfomentorCoordinator,
+    async_add_entities: AddEntitiesCallback,
+    build: Callable[[PupilData], list[Entity]],
+
+) -> None:
+    """Skapar entiteter för valfria delar när (och om) de dyker upp.
+
+    Alla konton är olika: fritids kan saknas vid första hämtningen (ett fel, en ny termin) och
+    komma senare. `build(pupil)` ger entiteterna för ett barn, eller en tom lista; den körs vid
+    start och efter varje uppdatering, och ett barn får sina entiteter en gång.
+    En entitet som väl skapats finns kvar.
+    """
+    created: set[str] = set()
+
+    def _add() -> None:
+        data = coordinator.data
+        new: list[Entity] = []
+        for pupil in data.pupils if data else []:
+            if pupil.pupil_id in created:
+                continue
+            if entities := build(pupil):
+                created.add(pupil.pupil_id)
+                new.extend(entities)
+        if new:
+            async_add_entities(new)
+
+    _add()
+    entry.async_on_unload(coordinator.async_add_listener(_add))
 
 
 class InfomentorPupilEntity(CoordinatorEntity[InfomentorCoordinator]):

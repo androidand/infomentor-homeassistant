@@ -11,7 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from .coordinator import InfomentorCoordinator, PupilData
-from .entity import InfomentorPupilEntity
+from .entity import InfomentorPupilEntity, add_entities_as_they_appear
 from .util import calendar_span, fritids_calendar_entries
 
 
@@ -23,9 +23,13 @@ async def async_setup_entry(
     entities: list[PupilCalendar] = []
     for pupil in pupils:
         entities.append(PupilCalendar(coordinator, entry, pupil))
-        if pupil.fritids:
-            entities.append(FritidsCalendar(coordinator, entry, pupil))
     async_add_entities(entities)
+    add_entities_as_they_appear(
+        entry,
+        coordinator,
+        async_add_entities,
+        lambda pupil: [FritidsCalendar(coordinator, entry, pupil)] if pupil.fritids else []
+    )
 
 
 def _localized(value: datetime | object) -> datetime | object:
