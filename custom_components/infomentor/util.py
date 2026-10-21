@@ -11,6 +11,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
+from urllib.parse import urljoin
 
 BREAK_RE = re.compile(r"^(lunch|rast|ombyte|m-tid|studietid|frukost)$", re.IGNORECASE)
 PE_RE = re.compile(r"\b(idh|idr|idrott|gymnastik|gympa)\b", re.IGNORECASE)
@@ -435,7 +436,7 @@ def weekly_letter_from_news(
         "group": "",
         "modified": day_of(item.get("publishedDate")),
         "attachments": [str(a.get("title")) for a in files if a.get("title")],
-        "attachment_urls": [f"{base_url}{a['url']}" for a in files if a.get("url")],
+        "attachment_urls": [urljoin(base_url, str(a["url"])) for a in files if a.get("url")],
     }
 
 
