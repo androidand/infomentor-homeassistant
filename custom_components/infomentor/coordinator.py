@@ -23,7 +23,7 @@ from .const import (
     DOMAIN,
     clamp_interval,
 )
-from .probe import Outcome
+from .probe import Outcome, SectionProbe
 from .util import (
     dedupe_plans,
     display_name,
@@ -91,6 +91,9 @@ class InfomentorCoordinator(DataUpdateCoordinator[InfomentorData]):
         # planerings-id -> {"at": monotonic(), "info": {...}}
         self._plan_details: dict[str, dict[str, Any]] = {}
         self._plan_ids_seen: set[str] = set()
+        # Valfria delar (fritids ...): vad hubben har gett per barn, se probe.py.
+        self._probe = SectionProbe()
+        self._last_good: dict[str, Any] = {}
         minutes = int(entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_MIN))
         super().__init__(
             hass,

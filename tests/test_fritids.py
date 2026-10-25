@@ -178,3 +178,25 @@ def test_a_new_round_forgets_answers_from_a_round_that_fell() -> None:
     me._ok_calls = 1
     InfomentorCoordinator._settle_probes(me)
     assert me._probe.due("fritids:7")
+
+
+async def test_a_real_coordinator_runs_a_whole_round_and_learns_what_the_child_lacks(hass) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(domain="infomentor", data={"username": "u", "password": "p"})
+    entry.add_to_hass(hass)
+    coordinator = InfomentorCoordinator(hass, entry, MagicMock())
+    api = MagicMock()
+    dicts = {"async_attendance", "async_learnlog", "async_plans"}
+    for name in ["async_switch_pupil", "async_lessons", "async_calendar", "async_tasks", "async_attendance", "async_learnlog", "async_plans", "async_notifications", "async_news"]:
+        setattr(api, name, AsyncMock(return_value={} if name in dicts else []))
+    api.async_fritids = AsyncMock(side_effect=InvalidAuth("403"))
+    coordinator.api = api
+    pupils = [{"id": "7", "name": "Efternamn, Barn", "switchPupilUrl": "u"}]
+    data = await coordinator._fetch_all(pupils)
+    assert data.pupils[0].fritids == []
+    assert not coordinator._probe.due("fritids:7")  # vi vet nu att barnet saknar fritids
+    await coordinator._fetch_all(pupils)
+    assert api.async_fritids.await_count == 1  # och frågar inte igen
