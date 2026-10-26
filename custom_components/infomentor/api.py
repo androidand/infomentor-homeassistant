@@ -334,13 +334,16 @@ class InfomentorApi:
             raise InfomentorError("barnet saknar switchPupilUrl")
         await self._follow(str(url))
 
-    async def async_lessons(self, pupil: MappingLike, *, days: int = 7) -> list[dict[str, Any]]:
+    async def async_lessons(
+        self, pupil: MappingLike, *, days: int = 30, back_days: int = 7
+    ) -> list[dict[str, Any]]:
+        """Schemat från `back_days` bakåt till `days` framåt (kalendern visar både och)."""
         today = date.today()
         data = await self._post_hub(
             "/timetable/timetable/gettimetablelist",
             {
                 "UTCOffset": "-120",
-                "start": today.isoformat(),
+                "start": (today - timedelta(days=back_days)).isoformat(),
                 "end": (today + timedelta(days=days)).isoformat(),
             },
         )

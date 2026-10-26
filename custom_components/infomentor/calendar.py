@@ -23,6 +23,7 @@ async def async_setup_entry(
     entities: list[PupilCalendar] = []
     for pupil in pupils:
         entities.append(PupilCalendar(coordinator, entry, pupil))
+        entities.append(LessonsCalendar(coordinator, entry, pupil))
     async_add_entities(entities)
     add_entities_as_they_appear(
         entry,
@@ -68,8 +69,9 @@ class PupilCalendar(InfomentorPupilEntity, CalendarEntity):
                     start=_localized(span[0]),
                     end=_localized(span[1]),
                     summary=entry["title"] or "–",
-                    description=entry["subjects"] or None,
-                    uid=entry["id"] or None,
+                    description=entry.get("subjects") or entry.get("teachers") or None,
+                    location=entry.get("room") or None,
+                    uid=entry.get("id") or None,
                 )
             )
         return sorted(events, key=lambda e: (e.start_datetime_local, e.end_datetime_local))
@@ -105,3 +107,18 @@ class FritidsCalendar(PupilCalendar):
     def _entries(self) -> list[dict]:
         pupil = self.pupil
         return fritids_calendar_entries(pupil.fritids) if pupil else []
+
+
+class LessonsCalendar(PupilCalendar):
+    """Skolschemat: lektionerna en vecka bakåt och en månad framåt."""
+
+    _attr_translation_key = "schedule_calendar"
+
+    def __init__(
+        self, coordinator: InfomentorCoordinator, entry: ConfigEntry, pupil: PupilData
+    ) -> None:
+        super().__init__(coordinator, entry, pupil, "schedule_calendar")
+
+    def _entries(self) -> list[dict]:
+        pupil = self.pupil
+        return pupil.lessons if pupil else []

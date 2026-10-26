@@ -115,6 +115,9 @@
       "calendar": {
         "name": "Calendar"
       },
+      "schedule_calendar": {
+        "name": "Schedule"
+      },
       "fritids_calendar": {
         "name": "Leisure-time centre"
       }

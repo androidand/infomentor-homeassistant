@@ -115,6 +115,9 @@
       "calendar": {
         "name": "Kalender"
       },
+      "schedule_calendar": {
+        "name": "Schema"
+      },
       "fritids_calendar": {
         "name": "Fritids"
       }

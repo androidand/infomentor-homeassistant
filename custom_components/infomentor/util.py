@@ -172,6 +172,11 @@ def extract_pupils(html: str) -> list[dict[str, Any]]:
 
 
 # --------------------------------------------------------------- normalisering
+def nothing_text(language: str | None) -> str:
+    """Tillståndet för "inget planerat" (lov, helg), i stället för att sensorn är okänd."""
+    return "Inget" if (language or "").lower().startswith("sv") else "Nothing"
+
+
 def normalize_lessons(raw: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """gettimetablelist -> lektioner (utan raster/lunch)."""
     out: list[dict[str, Any]] = []

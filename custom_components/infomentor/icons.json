@@ -33,6 +33,9 @@
       "calendar": {
         "default": "mdi:calendar-school"
       },
+      "schedule_calendar": {
+        "default": "mdi:timetable"
+      },
       "fritids_calendar": {
         "default": "mdi:human-child"
       }

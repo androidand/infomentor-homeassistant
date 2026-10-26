@@ -19,6 +19,7 @@ from .util import (
     lessons_on,
     lunch_for,
     next_school_day,
+    nothing_text,
     school_day_bounds,
     tasks_due,
     tasks_overdue,
@@ -73,6 +74,10 @@ class _PupilSensor(InfomentorPupilEntity, SensorEntity):
     def _today(self) -> date:
         return dt_util.now().date()
 
+    @property
+    def _language(self) -> str | None:
+        return getattr(getattr(self.hass, "config", None), "language", None)
+
 
 class SchoolDaySensor(_PupilSensor):
     """Skoldagens start–slut för nästa skoldag."""
@@ -90,7 +95,7 @@ class SchoolDaySensor(_PupilSensor):
             return None
         day = next_school_day(pupil.lessons, self._today)
         bounds = school_day_bounds(lessons_on(pupil.lessons, day)) if day else None
-        return f"{bounds[0]}–{bounds[1]}" if bounds else None
+        return f"{bounds[0]}–{bounds[1]}" if bounds else nothing_text(self._language)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -200,9 +205,14 @@ class LearnlogSensor(_PupilSensor):
         if self.pupil is None:
             return {}
         entries, source = self._letters()
+        latest = entries[0] if entries else {}
         return {
             "count": len(entries),
             "source": source,
+            # Det senaste brevet direkt som attribut; hela listan ligger i `entries`.
+            "text": latest.get("text"),
+            "attachments": latest.get("attachments", []),
+            "attachment_urls": latest.get("attachment_urls", []),
             "entries": [
                 {
                     "title": e["title"],
@@ -229,7 +239,9 @@ class FritidsSensor(_PupilSensor):
     @property
     def native_value(self) -> str | None:
         pupil = self.pupil
-        return fritids_today(pupil.fritids, dt_util.now().date()) if pupil else None
+        if pupil is None:
+            return None
+        return fritids_today(pupil.fritids, dt_util.now().date()) or nothing_text(self._language)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
